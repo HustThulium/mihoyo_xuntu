@@ -1,0 +1,13 @@
+.venv/
+.cache/
+.research/
+__pycache__/
+*.pyc
+build/
+dist/
+/RouteOverlay.spec
+projects/
+# Internal research, plans, validation records and work notes stay local.
+/docs/
+*.routepack
+*.log
