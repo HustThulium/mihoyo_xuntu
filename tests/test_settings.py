@@ -85,7 +85,27 @@ class MinimapSettingsTests(unittest.TestCase):
                              encoding="utf-8")
         settings = MinimapSettings(self.path)
         self.assertTrue(settings.preview_enabled)
+        self.assertTrue(settings.minimize_on_tracking)
         self.assertEqual(settings.position, self.position)
+
+    def test_window_preference_survives_restart_and_other_settings_updates(self):
+        settings = MinimapSettings(self.path)
+        self.assertTrue(settings.minimize_on_tracking)
+        settings.save_minimize_on_tracking(False)
+        settings = MinimapSettings(self.path)
+        self.assertFalse(settings.minimize_on_tracking)
+        settings.save_position(self.position)
+        settings.save_preview_enabled(False)
+        settings = MinimapSettings(self.path)
+        self.assertFalse(settings.minimize_on_tracking)
+        settings.save_minimize_on_tracking(True)
+        restarted = MinimapSettings(self.path)
+        self.assertTrue(restarted.minimize_on_tracking)
+        self.assertFalse(restarted.preview_enabled)
+        self.assertEqual(restarted.position, self.position)
+        for invalid in (None, 0, "false"):
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                restarted.save_minimize_on_tracking(invalid)
 
 
 if __name__ == "__main__":

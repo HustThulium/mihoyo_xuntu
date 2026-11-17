@@ -9,7 +9,8 @@ from unittest.mock import patch, Mock
 
 import numpy as np
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QEvent
+from PySide6.QtCore import QEvent, QTimer, Qt
+from PySide6.QtTest import QTest
 
 from map_overlay.app import MainWindow
 from map_overlay.project import Project
@@ -224,6 +225,109 @@ class AppSettingsTests(unittest.TestCase):
         self.assertTrue(self.window.preview_toggle.isChecked())
         self.assertIs(self.window.preview_worker, worker)
         error.assert_called_once()
+
+    def test_settings_entry_switch_and_reopening_preserve_saved_preference(self):
+        dialog = self.window.settings_dialog
+        observed = []
+
+        def edit_settings():
+            observed.append(dialog.isVisible())
+            observed.append(self.window.preview_toggle.window() is dialog)
+            QTest.mouseClick(dialog.preview_toggle, Qt.MouseButton.LeftButton)
+            dialog.reject()
+
+        QTimer.singleShot(0, edit_settings)
+        self.window.settings_button.click()
+        self.assertEqual(observed, [True, True])
+        self.assertFalse(MinimapSettings(self.path).preview_enabled)
+        self.assertFalse(dialog.preview_toggle.isChecked())
+        # Merely reopening/closing the panel must neither reset nor save settings.
+        with patch.object(self.window.minimap_settings, "save_preview_enabled") as save:
+            QTimer.singleShot(0, dialog.reject)
+            self.window.open_settings()
+        save.assert_not_called()
+        self.assertFalse(dialog.preview_toggle.isChecked())
+
+    def test_position_entry_is_independent_of_program_settings(self):
+        self.window.save_minimap_position(self.position, self.selected_image())
+        dialog = self.window.settings_dialog
+        observed = []
+
+        def choose_position():
+            position_dialog = self.app.activeModalWidget()
+            observed.append(position_dialog.windowTitle())
+            observed.append(dialog.isVisible())
+            position_dialog.select_button.click()
+
+        with patch.object(self.window, "select_minimap") as select:
+            QTimer.singleShot(0, choose_position)
+            self.window.minimap_position_button.click()
+            select.assert_called_once()
+            # Program preferences must never trigger the minimap position workflow.
+            QTimer.singleShot(0, dialog.reject)
+            self.window.open_settings()
+            select.assert_called_once()
+        self.assertEqual(observed, ["小地图位置设置", False])
+        self.assertEqual(list(dialog.category_indexes), ["general"])
+
+    def test_window_preference_switch_persists_and_rolls_back_failed_save(self):
+        toggle = self.window.settings_dialog.minimize_toggle
+        self.window.settings_dialog.show()
+        self.app.processEvents()
+        QTest.mouseClick(toggle, Qt.MouseButton.LeftButton)
+        self.assertFalse(MinimapSettings(self.path).minimize_on_tracking)
+        with patch("map_overlay.settings.os.replace", side_effect=PermissionError("locked")), \
+                patch.object(self.window, "error") as error:
+            QTest.mouseClick(toggle, Qt.MouseButton.LeftButton)
+        self.assertFalse(toggle.isChecked())
+        self.assertFalse(self.window.minimap_settings.minimize_on_tracking)
+        self.assertFalse(MinimapSettings(self.path).minimize_on_tracking)
+        error.assert_called_once()
+        self.window.settings_dialog.close()
+        restarted = MainWindow(settings_path=self.path)
+        try:
+            self.assertFalse(restarted.settings_dialog.minimize_toggle.isChecked())
+        finally:
+            restarted.close()
+            restarted.deleteLater()
+            self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    def test_tracking_respects_window_preference_and_preserves_maximization(self):
+        self.window.save_minimap_position(self.position, self.selected_image())
+        self.window.project = Project(self.image, strokes=[[[0, 0], [20, 20]]])
+        with patch("map_overlay.app.TrackingWorker"):
+            for minimize in (True, False):
+                self.window.settings_dialog.minimize_toggle.setChecked(minimize)
+                for maximized in (True, False):
+                    with self.subTest(minimize=minimize, maximized=maximized):
+                        if maximized:
+                            self.window.showMaximized()
+                        else:
+                            self.window.showNormal()
+                        self.app.processEvents()
+                        geometry = self.window.normalGeometry()
+                        self.window.toggle_tracking()
+                        self.app.processEvents()
+                        self.assertEqual(self.window.isMinimized(), minimize)
+                        self.window.stop_tracking()
+                        self.app.processEvents()
+                        self.assertFalse(self.window.isMinimized())
+                        self.assertEqual(self.window.isMaximized(), maximized)
+                        self.assertEqual(self.window.normalGeometry(), geometry)
+
+    def test_capture_return_preserves_maximized_window(self):
+        self.window.showMaximized()
+        self.app.processEvents()
+        with patch("map_overlay.app.QTimer.singleShot", side_effect=lambda delay, callback: callback()), \
+                patch("map_overlay.app.native.foreground_is", return_value=True), \
+                patch("map_overlay.app.grab", return_value=self.image):
+            received = Mock()
+            self.window.capture_action(received)
+        self.app.processEvents()
+        received.assert_called_once()
+        self.assertTrue(self.window.isVisible())
+        self.assertTrue(self.window.isMaximized())
+        self.assertFalse(self.window.isMinimized())
 
 
 if __name__ == "__main__":

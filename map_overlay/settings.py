@@ -1,4 +1,4 @@
-"""Local game-display settings, independent of maps and route matching."""
+"""Local program and game-display settings, independent of map projects."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -50,6 +50,7 @@ class MinimapSettings:
         self.path = Path(path)
         self.position = None
         self.preview_enabled = True
+        self.minimize_on_tracking = True
         self.load_error = None
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
@@ -58,9 +59,13 @@ class MinimapSettings:
             enabled = payload.get("preview_enabled", True)
             if type(enabled) is not bool:
                 raise ValueError("实时预览开关无效。")
+            minimize = payload.get("minimize_on_tracking", True)
+            if type(minimize) is not bool:
+                raise ValueError("开始叠加后自动最小化开关无效。")
             position = payload.get("minimap")
             self.position = MinimapPosition.from_payload(position) if position is not None else None
             self.preview_enabled = enabled
+            self.minimize_on_tracking = minimize
         except FileNotFoundError:
             pass
         except (OSError, ValueError, TypeError) as exc:
@@ -69,16 +74,21 @@ class MinimapSettings:
     def save_position(self, position):
         if not isinstance(position, MinimapPosition):
             raise ValueError("小地图位置配置无效。")
-        self._save(position, self.preview_enabled)
+        self._save(position, self.preview_enabled, self.minimize_on_tracking)
 
     def save_preview_enabled(self, enabled):
         if type(enabled) is not bool:
             raise ValueError("实时预览开关无效。")
-        self._save(self.position, enabled)
+        self._save(self.position, enabled, self.minimize_on_tracking)
 
-    def _save(self, position, preview_enabled):
+    def save_minimize_on_tracking(self, enabled):
+        if type(enabled) is not bool:
+            raise ValueError("开始叠加后自动最小化开关无效。")
+        self._save(self.position, self.preview_enabled, enabled)
+
+    def _save(self, position, preview_enabled, minimize_on_tracking):
         payload = dict(version=1, minimap=position.to_payload() if position else None,
-                       preview_enabled=preview_enabled)
+                       preview_enabled=preview_enabled, minimize_on_tracking=minimize_on_tracking)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
         try:
@@ -91,6 +101,7 @@ class MinimapSettings:
         # Publish only after the persistent update succeeds.
         self.position = position
         self.preview_enabled = preview_enabled
+        self.minimize_on_tracking = minimize_on_tracking
         self.load_error = None
 
     def require_position(self, client_size):

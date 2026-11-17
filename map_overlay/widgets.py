@@ -224,7 +224,7 @@ class RegionDialog(QDialog):
 
 
 class MinimapSettingsDialog(QDialog):
-    """Settings entry point; screen capture and persistence belong to the app."""
+    """Dedicated minimap position workflow, separate from program preferences."""
 
     def __init__(self, status, position=None, parent=None):
         super().__init__(parent)
@@ -243,9 +243,9 @@ class MinimapSettingsDialog(QDialog):
                              "框选前请关闭游戏大地图，确保小地图完整可见。")
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
-        select = QPushButton("重新框选小地图位置" if position else "从游戏画面框选小地图位置")
-        select.clicked.connect(lambda: self.choose("select"))
-        layout.addWidget(select)
+        self.select_button = QPushButton("重新框选小地图位置" if position else "从游戏画面框选小地图位置")
+        self.select_button.clicked.connect(lambda: self.choose("select"))
+        layout.addWidget(self.select_button)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.button(QDialogButtonBox.StandardButton.Close).setText("关闭")
         buttons.rejected.connect(self.reject)

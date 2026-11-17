@@ -17,6 +17,7 @@ from .capture import TrackingWorker, PreviewWorker, grab
 from .geometry import inverse
 from .project import Project, read_image
 from .settings import MinimapPosition, MinimapSettings
+from .settings_ui import SettingsDialog
 from .vision import Localizer
 from .widgets import (ImageView, RegionDialog, CalibrationDialog, DrawingOverlay,
                       RouteOverlay, MinimapSettingsDialog, qimage, paint_routes)
@@ -33,6 +34,7 @@ QPushButton:hover { background:#223b49; border-color:#4b9e8d; }
 QPushButton:disabled { color:#526574; border-color:#22313d; }
 QPushButton#primary { background:#22745f; border-color:#32987d; color:white; font-weight:600; }
 QPushButton#primary:hover { background:#2d8c73; }
+QPushButton#settingsButton { padding:0; text-align:center; font-family:'Segoe UI Symbol'; font-size:21px; }
 QComboBox { background:#1a2a37; border:1px solid #2b4050; border-radius:6px; padding:7px; }
 QComboBox QAbstractItemView { background:#1a2a37; selection-background-color:#22745f; }
 QCheckBox { spacing:8px; padding:4px; }
@@ -90,6 +92,7 @@ class MainWindow(QMainWindow):
         sidebar.setFixedWidth(288)
         side = QVBoxLayout(sidebar)
         side.setContentsMargins(0, 0, 0, 0)
+        side.setSpacing(4)
         title = QLabel("循图  /  ROUTE")
         title.setObjectName("title")
         side.addWidget(title)
@@ -122,8 +125,8 @@ class MainWindow(QMainWindow):
         refresh.clicked.connect(self.refresh_windows)
         row.addWidget(refresh)
         side.addLayout(row)
-        section("程序设置")
-        button("小地图位置设置…", self.open_minimap_settings)
+        section("小地图位置")
+        self.minimap_position_button = button("小地图位置设置…", self.open_minimap_settings)
         self.minimap_status = QLabel()
         self.minimap_status.setObjectName("muted")
         self.minimap_status.setWordWrap(True)
@@ -155,6 +158,13 @@ class MainWindow(QMainWindow):
         note.setWordWrap(True)
         side.addWidget(note)
         side.addStretch()
+        self.settings_button = QPushButton("⚙")
+        self.settings_button.setObjectName("settingsButton")
+        self.settings_button.setFixedSize(34, 34)
+        self.settings_button.setToolTip("设置")
+        self.settings_button.setAccessibleName("设置")
+        self.settings_button.clicked.connect(self.open_settings)
+        side.addWidget(self.settings_button, alignment=Qt.AlignmentFlag.AlignLeft)
         outer.addWidget(sidebar)
 
         content = QVBoxLayout()
@@ -192,11 +202,6 @@ class MainWindow(QMainWindow):
         self.preview_caption.setWordWrap(True)
         self.preview_caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
         preview_column.addWidget(self.preview_caption)
-        self.preview_toggle = QCheckBox("实时同步小地图")
-        self.preview_toggle.setChecked(self.minimap_settings.preview_enabled)
-        self.preview_toggle.setToolTip("每秒最多刷新 3 次，仅截图；不执行地形匹配，不影响路线叠加开关。")
-        self.preview_toggle.toggled.connect(self.toggle_preview)
-        preview_column.addWidget(self.preview_toggle)
         row.addLayout(preview_column)
         info = QVBoxLayout()
         self.state = QLabel("等待准备地图")
@@ -207,7 +212,7 @@ class MainWindow(QMainWindow):
         self.metrics.setWordWrap(True)
         self.metrics.setObjectName("muted")
         info.addWidget(self.metrics)
-        self.detail = QLabel("左键拖动画线；取消勾选后可拖动浏览，滚轮缩放。\n在游戏地图上绘制时：Enter 确认，Esc 取消，Ctrl+Z 撤销。\n开始实时叠加后控制台最小化；切出游戏会立即隐藏路线。")
+        self.detail = QLabel("左键拖动画线；取消勾选后可拖动浏览，滚轮缩放。\n在游戏地图上绘制时：Enter 确认，Esc 取消，Ctrl+Z 撤销。\n可在设置中选择开始叠加后是否自动最小化；切出游戏会立即隐藏路线。")
         self.detail.setObjectName("muted")
         self.detail.setWordWrap(True)
         info.addWidget(self.detail)
@@ -217,6 +222,12 @@ class MainWindow(QMainWindow):
         splitter.setSizes([490, 220])
         content.addWidget(splitter, 1)
         outer.addLayout(content, 1)
+        self.settings_dialog = SettingsDialog(
+            self.minimap_settings.preview_enabled, parent=self,
+            minimize_on_tracking=self.minimap_settings.minimize_on_tracking)
+        self.preview_toggle = self.settings_dialog.preview_toggle
+        self.preview_toggle.toggled.connect(self.toggle_preview)
+        self.settings_dialog.minimize_toggle.toggled.connect(self.toggle_minimize_on_tracking)
 
     def error(self, exception):
         QMessageBox.warning(self, "无法完成操作", str(exception))
@@ -260,7 +271,8 @@ class MainWindow(QMainWindow):
         return box[2:] if box else None
 
     def update_minimap_status(self):
-        self.minimap_status.setText(self.minimap_settings.status(self.current_client_size()))
+        status = self.minimap_settings.status(self.current_client_size())
+        self.minimap_status.setText(status)
 
     def toggle_preview(self, enabled):
         try:
@@ -285,17 +297,34 @@ class MainWindow(QMainWindow):
         self.preview_worker = None
         return True
 
+    def toggle_minimize_on_tracking(self, enabled):
+        try:
+            self.minimap_settings.save_minimize_on_tracking(enabled)
+        except Exception as exc:
+            toggle = self.settings_dialog.minimize_toggle
+            toggle.blockSignals(True)
+            toggle.setChecked(self.minimap_settings.minimize_on_tracking)
+            toggle.blockSignals(False)
+            self.error(exc)
+
+    def restore_window(self):
+        # showNormal() also clears WindowMaximized. Remove only minimization so
+        # both maximized windows and normal windows retain their existing state.
+        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.show()
+        self.activateWindow()
+
     def sync_preview(self):
         target = self.targets.currentData()
         position = self.minimap_settings.position
-        active = bool(self.preview_toggle.isChecked() and target and position and not self.busy)
+        active = bool(self.minimap_settings.preview_enabled and target and position and not self.busy)
         if (active and self.preview_worker is not None and
                 self.preview_worker.hwnd == target and self.preview_worker.position == position):
             return
         if not self.stop_preview():
             return
         if not active:
-            if not self.preview_toggle.isChecked():
+            if not self.minimap_settings.preview_enabled:
                 self.preview_caption.setText("实时同步已关闭 · 保留最后画面")
             elif not target:
                 self.preview_caption.setText("实时同步等待选择游戏窗口")
@@ -416,12 +445,11 @@ class MainWindow(QMainWindow):
                     raise ValueError("截图期间窗口发生变化，请重试。")
                 callback(image, box)
             except Exception as exc:
-                self.showNormal()
+                self.restore_window()
                 self.error(exc)
             finally:
                 self.busy = False
-                self.showNormal()
-                self.activateWindow()
+                self.restore_window()
                 self.sync_preview()
 
         QTimer.singleShot(500, capture)
@@ -527,13 +555,17 @@ class MainWindow(QMainWindow):
             self.error(exc)
             return False
 
-    def open_minimap_settings(self):
-        if self.busy:
+    def open_settings(self, checked=False):
+        if self.busy or self.settings_dialog.isVisible():
             return
-        size = self.current_client_size()
+        self.settings_dialog.exec()
+
+    def open_minimap_settings(self):
+        if self.busy or self.settings_dialog.isVisible():
+            return
         self.update_minimap_status()
-        dialog = MinimapSettingsDialog(self.minimap_settings.status(size), self.minimap_settings.position,
-                                       parent=self)
+        dialog = MinimapSettingsDialog(self.minimap_settings.status(self.current_client_size()),
+                                       self.minimap_settings.position, parent=self)
         self.busy = True
         if not self.stop_preview():
             self.busy = False
@@ -543,9 +575,7 @@ class MainWindow(QMainWindow):
         finally:
             self.busy = False
             self.sync_preview()
-        if not accepted:
-            return
-        if dialog.action == "select":
+        if accepted and dialog.action == "select":
             self.select_minimap()
 
     def save_minimap_position(self, position, preview_image):
@@ -628,7 +658,8 @@ class MainWindow(QMainWindow):
             self.worker.start()
             self.track_button.setText("停止叠加  Ctrl+Alt+F9")
             self.state.setText("正在建立实时定位…")
-            self.showMinimized()
+            if self.minimap_settings.minimize_on_tracking:
+                self.showMinimized()
             native.focus(target)
         except Exception as exc:
             self.error(exc)
@@ -647,8 +678,7 @@ class MainWindow(QMainWindow):
             self.state.setText("叠加已停止")
         self.track_button.setText("开始叠加  Ctrl+Alt+F9")
         if show:
-            self.showNormal()
-            self.activateWindow()
+            self.restore_window()
         return True
 
     def receive_frame(self, payload):
@@ -766,7 +796,7 @@ class MainWindow(QMainWindow):
 
     def nativeEvent(self, event_type, message):
         key = native.hotkey_message(message)
-        if key and not self.busy:
+        if key and not self.busy and not self.settings_dialog.isVisible():
             # Queue actions after the native event, so modal dialogs do not nest here.
             action = {1: self.draw_on_game, 2: self.toggle_tracking, 3: self.stop_tracking}.get(key)
             if action:
