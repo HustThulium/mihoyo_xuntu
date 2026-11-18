@@ -1,18 +1,20 @@
 from __future__ import annotations
 
-import copy
+from dataclasses import replace
 import math
 
 import cv2
-import numpy as np
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QRect
 from PySide6.QtGui import (QImage, QPixmap, QPainter, QPainterPath, QPen, QColor,
-                           QBrush, QKeySequence, QShortcut, QGuiApplication)
+                           QBrush, QKeySequence, QShortcut, QGuiApplication, QTransform)
 from PySide6.QtWidgets import (QWidget, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                               QPushButton, QDialogButtonBox, QGraphicsView,
-                              QGraphicsScene, QGraphicsPathItem)
+                              QGraphicsScene, QColorDialog)
 
-from .geometry import inverse, similarity, transform_points
+from .annotations import (AnnotationEdits, Stroke, affine_transform, marker_rect,
+                          paint_annotations, paint_minimap)
+from .geometry import inverse, similarity
+from .project import DEFAULT_MARKER_SIZE, Marker
 from . import native
 
 
@@ -22,31 +24,7 @@ def qimage(bgr):
     return QImage(rgb.data, w, h, int(rgb.strides[0]), QImage.Format.Format_RGB888).copy()
 
 
-def route_path(strokes, matrix=None):
-    path = QPainterPath()
-    for stroke in strokes:
-        points = transform_points(stroke, matrix) if matrix is not None else np.asarray(stroke)
-        if len(points) < 2:
-            continue
-        path.moveTo(float(points[0, 0]), float(points[0, 1]))
-        for x, y in points[1:]:
-            path.lineTo(float(x), float(y))
-    return path
-
-
-def paint_routes(painter, strokes, matrix=None, color="#63f5c3", width=3):
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    path = route_path(strokes, matrix)
-    painter.setPen(QPen(QColor(7, 21, 27, 200), width + 3, Qt.PenStyle.SolidLine,
-                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-    painter.drawPath(path)
-    painter.setPen(QPen(QColor(color), width, Qt.PenStyle.SolidLine,
-                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-    painter.drawPath(path)
-
-
 class ImageView(QGraphicsView):
-    changed = Signal()
     picked = Signal(float, float)
     selected = Signal(object)
 
@@ -57,16 +35,12 @@ class ImageView(QGraphicsView):
         self.setBackgroundBrush(QColor("#0c131a"))
         self.setMinimumSize(160, 140)
         self.image = None
-        self.mode = mode
-        self.strokes = []
-        self.current = None
         self.start = None
         self.selection = None
         self.markers = []
-        self.color = "#63f5c3"
-        self.route_item = None
         self.selection_item = None
         self._zoomed = False
+        ImageView.set_mode(self, mode)
         if image is not None:
             self.set_image(image)
 
@@ -76,16 +50,11 @@ class ImageView(QGraphicsView):
         self.markers = []
         self.scene().addPixmap(QPixmap.fromImage(qimage(image)))
         self.scene().setSceneRect(0, 0, image.shape[1], image.shape[0])
-        self.route_item = QGraphicsPathItem()
-        self.route_item.setPen(QPen(QColor(self.color), 3, Qt.PenStyle.SolidLine,
-                                    Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        self.scene().addItem(self.route_item)
         self.selection_item = self.scene().addRect(QRectF(), QPen(QColor("#ffce73"), 2))
         self.selection_item.hide()
         self.selection = None
         self._zoomed = False
         self.fit_image()
-        self.refresh_routes()
 
     def fit_image(self):
         if self.image is not None:
@@ -120,9 +89,6 @@ class ImageView(QGraphicsView):
     def mousePressEvent(self, event):
         point = self.image_point(event)
         if event.button() == Qt.MouseButton.LeftButton and point is not None:
-            if self.mode == "draw":
-                self.current = [point]
-                return
             if self.mode == "pick":
                 self.picked.emit(*point)
                 return
@@ -133,11 +99,6 @@ class ImageView(QGraphicsView):
 
     def mouseMoveEvent(self, event):
         point = self.image_point(event)
-        if self.current is not None and point is not None:
-            if np.linalg.norm(np.array(point) - self.current[-1]) >= 2:
-                self.current.append(point)
-                self.refresh_routes()
-            return
         if self.start is not None and point is not None:
             x0, y0 = self.start
             dx, dy = point[0] - x0, point[1] - y0
@@ -153,30 +114,11 @@ class ImageView(QGraphicsView):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            if self.current is not None:
-                if len(self.current) >= 2:
-                    self.strokes.append(self.current)
-                    self.changed.emit()
-                self.current = None
-                self.refresh_routes()
-                return
             if self.start is not None:
                 self.start = None
                 self.selected.emit(self.selection)
                 return
         super().mouseReleaseEvent(event)
-
-    def refresh_routes(self):
-        if self.route_item:
-            self.route_item.setPath(route_path(self.strokes + ([self.current] if self.current else [])))
-            self.route_item.setPen(QPen(QColor(self.color), 3, Qt.PenStyle.SolidLine,
-                                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-
-    def undo(self):
-        if self.strokes:
-            self.strokes.pop()
-            self.refresh_routes()
-            self.changed.emit()
 
     def mark(self, points):
         for item in self.markers:
@@ -189,6 +131,181 @@ class ImageView(QGraphicsView):
             text.setDefaultTextColor(QColor("#ffce73"))
             text.setPos(x + 5, y - 18)
             self.markers.extend([dot, text])
+
+
+class AnnotationView(ImageView):
+    changed = Signal()
+    marker_selected = Signal(object)
+    placement_changed = Signal(bool)
+    placement_failed = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(mode="draw", parent=parent)
+        self.project = None
+        self.edits = None
+        self.stroke = None
+        self.pending_asset = None
+        self.placement_size = DEFAULT_MARKER_SIZE
+        self.selected_marker = None
+        self.drag_start = None
+        self.dragged_marker = None
+
+    def set_project(self, project):
+        self.project = project
+        self.edits = AnnotationEdits(project)
+        self.placement_size = DEFAULT_MARKER_SIZE
+        self.set_mode(self.mode)
+        self.set_image(project.image)
+
+    def set_mode(self, mode):
+        super().set_mode(mode)
+        self.stroke = None
+        self.cancel_placement()
+        self.select_marker(None)
+
+    def select_marker(self, index):
+        self.selected_marker = index
+        self.drag_start = None
+        self.dragged_marker = None
+        self.marker_selected.emit(self.project.markers[index] if index is not None else None)
+        self.viewport().update()
+
+    def prepare_marker(self, asset):
+        self.select_marker(None)
+        self.pending_asset = asset
+        self.placement_changed.emit(True)
+        self.setFocus()
+
+    def cancel_placement(self):
+        if self.pending_asset is not None:
+            self.pending_asset = None
+            self.placement_changed.emit(False)
+
+    def change_marker_size(self, size):
+        if self.selected_marker is None:
+            self.placement_size = size
+            return
+        marker = self.project.markers[self.selected_marker]
+        if self.edits.update_marker(self.selected_marker, replace(marker, size=size)):
+            self.viewport().update()
+            self.changed.emit()
+
+    def delete_marker(self):
+        if self.selected_marker is not None:
+            self.edits.remove_marker(self.selected_marker)
+            self.select_marker(None)
+            self.changed.emit()
+
+    def commit_strokes(self, strokes):
+        changed = False
+        for stroke in strokes:
+            changed |= self.edits.draw(stroke)
+        if changed:
+            self.changed.emit()
+        self.viewport().update()
+        return changed
+
+    def undo(self):
+        if self.edits is not None and self.edits.undo():
+            self.stroke = None
+            self.select_marker(None)
+            self.changed.emit()
+
+    def marker_bounds(self, marker):
+        return marker_rect(marker, QPointF(marker.x, marker.y), 1 / self.transform().m11())
+
+    def drawForeground(self, painter, exposed):
+        if self.project is None:
+            return
+        painter.save()
+        painter.setClipRect(self.sceneRect(), Qt.ClipOperation.IntersectClip)
+        markers = self.project.markers
+        if self.dragged_marker is not None:
+            markers = markers.copy()
+            markers[self.selected_marker] = self.dragged_marker
+        strokes = () if self.stroke is None else (self.stroke,)
+        paint_annotations(painter, self.project, QTransform(), exposed, 1 / self.transform().m11(), strokes, markers)
+        if self.selected_marker is not None:
+            pen = QPen(QColor("#ffce73"), 1, Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            painter.drawRect(self.marker_bounds(markers[self.selected_marker]))
+        painter.restore()
+
+    def mousePressEvent(self, event):
+        if (self.project is not None and self.mode != "view" and
+                event.button() == Qt.MouseButton.LeftButton):
+            point = self.mapToScene(event.position().toPoint())
+            if not (0 <= point.x() < self.sceneRect().width() and 0 <= point.y() < self.sceneRect().height()):
+                self.select_marker(None)
+            elif self.mode == "draw":
+                self.stroke = Stroke(QPainterPath(point), self.project.color)
+                self.viewport().update()
+            elif self.pending_asset is not None:
+                try:
+                    self.edits.add_marker(Marker(self.pending_asset, point.x(), point.y(), self.placement_size))
+                except ValueError as exc:
+                    self.cancel_placement()
+                    self.placement_failed.emit(str(exc))
+                else:
+                    self.viewport().update()
+                    self.changed.emit()
+            else:
+                index = next((i for i in range(len(self.project.markers) - 1, -1, -1)
+                              if self.marker_bounds(self.project.markers[i]).contains(point)), None)
+                self.select_marker(index)
+                if index is not None:
+                    self.drag_start = point
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        point = self.mapToScene(event.position().toPoint())
+        if self.stroke is not None:
+            self.stroke.add_point(point)
+            self.viewport().update()
+        elif self.drag_start is not None:
+            self.move_marker(point)
+        else:
+            super().mouseMoveEvent(event)
+
+    def move_marker(self, point):
+        delta = point - self.drag_start
+        marker = self.project.markers[self.selected_marker]
+        if delta.isNull():
+            self.dragged_marker = marker
+        else:
+            h, w = self.project.image.shape[:2]
+            x = min(w - 1, max(0, marker.x + delta.x()))
+            y = min(h - 1, max(0, marker.y + delta.y()))
+            self.dragged_marker = replace(marker, x=x, y=y)
+        self.viewport().update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            point = self.mapToScene(event.position().toPoint())
+            if self.stroke is not None:
+                stroke, self.stroke = self.stroke, None
+                stroke.add_point(point)
+                self.commit_strokes((stroke,))
+                return
+            if self.drag_start is not None:
+                self.move_marker(point)
+                changed = self.edits.update_marker(self.selected_marker, self.dragged_marker)
+                self.drag_start = self.dragged_marker = None
+                if changed:
+                    self.changed.emit()
+                return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if self.mode == "marker" and event.key() == Qt.Key.Key_Escape:
+            self.cancel_placement()
+            self.select_marker(None)
+        elif self.mode == "marker" and event.key() == Qt.Key.Key_Delete:
+            self.delete_marker()
+        else:
+            super().keyPressEvent(event)
 
 
 class RegionDialog(QDialog):
@@ -365,82 +482,114 @@ class RouteOverlay(QWidget):
                          Qt.WindowType.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.strokes = []
+        self.project = None
         self.matrix = None
-        self.color = "#63f5c3"
         self.pixel_size = (1, 1)
+        self.pixel_ratio = 1.0
         self.capture_box = None
 
-    def display(self, box, strokes, query_to_ref, color):
-        geometry, _ = logical_geometry(box)
+    def display(self, box, project, query_to_ref):
+        self.position_at(box)
+        self.project = project
+        self.matrix = affine_transform(inverse(query_to_ref))
+        if not self.isVisible():
+            if not self.set_capture_excluded(True):
+                raise OSError("系统无法将叠加层排除出截屏，已停止显示，避免识别到覆盖内容自身。")
+            self.show()
+        self.update()
+
+    def display_frozen(self, box):
+        self.position_at(box)
+        if not self.isVisible():
+            if not self.set_capture_excluded(False):
+                raise OSError("Windows 未能重新显示可截图的叠加层。")
+            self.show()
+        self.update()
+
+    def position_at(self, box):
+        geometry, self.pixel_ratio = logical_geometry(box)
         self.setGeometry(geometry)
         self.pixel_size = box[2:]
         self.capture_box = tuple(box)
-        self.strokes, self.matrix, self.color = strokes, inverse(query_to_ref), color
-        if not self.isVisible():
-            self.show()
-            if not native.exclude(int(self.winId())):
-                self.hide()
-                raise OSError("系统无法将叠加层排除出截屏，已停止显示，避免识别到路线自身。")
-        self.update()
+
+    def set_capture_excluded(self, excluded):
+        return native.set_capture_excluded(int(self.winId()), excluded)
 
     def paintEvent(self, _):
-        if self.matrix is None:
+        if self.project is None:
             return
         painter = QPainter(self)
         painter.scale(self.width() / self.pixel_size[0], self.height() / self.pixel_size[1])
         w, h = self.pixel_size
-        clip = QPainterPath()
-        radius = min(w, h) * .445
-        clip.addEllipse(QPointF(w / 2, h / 2), radius, radius)
-        painter.setClipPath(clip)
-        paint_routes(painter, self.strokes, self.matrix, self.color)
+        paint_minimap(painter, self.project, self.matrix, QRectF(0, 0, w, h), self.pixel_ratio)
 
 
 class DrawingOverlay(QDialog):
     """Draw over a frozen map capture at its original desktop position."""
 
-    def __init__(self, image, box, strokes, query_to_ref, color, parent=None):
+    def __init__(self, image, box, project, query_to_ref, parent=None):
         super().__init__(parent, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
-        geometry, _ = logical_geometry(box)
+        geometry, self.pixel_ratio = logical_geometry(box)
         self.setGeometry(geometry)
         self.background = qimage(image)
         self.pixel_size = (image.shape[1], image.shape[0])
-        self.strokes = copy.deepcopy(strokes)
-        self.query_to_ref = query_to_ref
-        self.ref_to_query = inverse(query_to_ref)
-        self.color = color
+        self.project = project
+        self.strokes = []
+        self.query_to_ref = affine_transform(query_to_ref)
+        self.ref_to_query = affine_transform(inverse(query_to_ref))
+        self.color = project.color
         self.current = None
         self.setCursor(Qt.CursorShape.CrossCursor)
         QShortcut(QKeySequence("Ctrl+Z"), self, activated=self.undo)
+        QShortcut(QKeySequence("C"), self, activated=self.choose_color)
+        self.color_button = QPushButton("画笔颜色 (C)", self)
+        self.color_button.clicked.connect(self.choose_color)
+        self.color_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.update_color_button()
+        self.color_button.adjustSize()
+        self.color_button.move(self.width() - self.color_button.width() - 8, 6)
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.current = [self.to_reference(event.position())]
+        if event.button() == Qt.MouseButton.LeftButton and event.position().y() >= 44:
+            point = self.to_reference(event.position())
+            h, w = self.project.image.shape[:2]
+            if 0 <= point.x() < w and 0 <= point.y() < h:
+                self.current = Stroke(QPainterPath(point), self.color)
+                self.update()
 
     def to_reference(self, point):
-        query_point = [point.x() * self.pixel_size[0] / self.width(),
-                       point.y() * self.pixel_size[1] / self.height()]
-        return transform_points([query_point], self.query_to_ref)[0].tolist()
+        query_point = QPointF(point.x() * self.pixel_size[0] / self.width(),
+                              point.y() * self.pixel_size[1] / self.height())
+        return self.query_to_ref.map(query_point)
 
     def mouseMoveEvent(self, event):
         if self.current is not None:
-            point = self.to_reference(event.position())
-            if np.linalg.norm(np.array(point) - self.current[-1]) > 1:
-                self.current.append(point)
-                self.update()
+            self.current.add_point(self.to_reference(event.position()))
+            self.update()
 
     def mouseReleaseEvent(self, event):
         if self.current is not None and event.button() == Qt.MouseButton.LeftButton:
-            if len(self.current) >= 2:
-                self.strokes.append(self.current)
+            self.current.add_point(self.to_reference(event.position()))
+            self.strokes.append(self.current)
             self.current = None
             self.update()
 
     def undo(self):
-        if self.strokes:
+        if self.current is not None:
+            self.current = None
+            self.update()
+        elif self.strokes:
             self.strokes.pop()
             self.update()
+
+    def choose_color(self):
+        selected = QColorDialog.getColor(QColor(self.color), self, "画笔颜色")
+        if selected.isValid():
+            self.color = selected.name()
+            self.update_color_button()
+
+    def update_color_button(self):
+        self.color_button.setStyleSheet(f"border-left: 4px solid {self.color};")
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -454,10 +603,12 @@ class DrawingOverlay(QDialog):
         painter = QPainter(self)
         painter.drawImage(self.rect(), self.background)
         painter.save()
-        painter.scale(self.width() / self.pixel_size[0], self.height() / self.pixel_size[1])
-        paint_routes(painter, self.strokes + ([self.current] if self.current else []), self.ref_to_query, self.color)
+        w, h = self.pixel_size
+        painter.scale(self.width() / w, self.height() / h)
+        strokes = self.strokes + ([self.current] if self.current is not None else [])
+        paint_annotations(painter, self.project, self.ref_to_query, QRectF(0, 0, w, h), self.pixel_ratio, strokes)
         painter.restore()
-        painter.fillRect(0, 0, self.width(), 38, QColor(8, 17, 24, 225))
+        painter.fillRect(0, 0, self.width(), 44, QColor(8, 17, 24, 225))
         painter.setPen(QColor("#e7f4f2"))
-        painter.drawText(QRect(14, 0, self.width() - 28, 38), Qt.AlignmentFlag.AlignVCenter,
-                         "冻结画面绘制 · Enter 确认 · Esc 取消 · Ctrl+Z 撤销（绘制时地图不会移动）")
+        painter.drawText(QRect(14, 0, self.color_button.x() - 22, 44), Qt.AlignmentFlag.AlignVCenter,
+                         "Enter 确认 · Esc 取消 · Ctrl+Z 撤销")

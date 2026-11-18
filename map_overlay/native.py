@@ -91,9 +91,9 @@ def focus(hwnd):
     user32.SetForegroundWindow(hwnd)
 
 
-def exclude(hwnd):
-    # Excludes only our own overlay, avoiding screen-capture feedback.
-    return bool(user32.SetWindowDisplayAffinity(hwnd, 0x11))
+def set_capture_excluded(hwnd, excluded):
+    # WDA_EXCLUDEFROMCAPTURE excludes our overlay from desktop capture.
+    return bool(user32.SetWindowDisplayAffinity(hwnd, 0x11 if excluded else 0))
 
 
 def monitor_for(box, with_handle=False):
@@ -111,9 +111,13 @@ def monitor_for(box, with_handle=False):
     return (info.device, bounds, int(monitor)) if with_handle else (info.device, bounds)
 
 
+SCREENSHOT_HOTKEY = 4
+HOTKEYS = {1: 0x77, 2: 0x78, 3: 0x79, SCREENSHOT_HOTKEY: 0x7A}  # F8 through F11
+
+
 def register_hotkeys(hwnd):
     result = []
-    for key_id, key in [(1, 0x77), (2, 0x78), (3, 0x79)]:  # F8, F9, F10
+    for key_id, key in HOTKEYS.items():
         if user32.RegisterHotKey(hwnd, key_id, 0x4003, key):  # Ctrl+Alt+NoRepeat
             result.append(key_id)
     return result

@@ -1,8 +1,12 @@
 """Deterministic synthetic terrain for offline validation; no game assets."""
 import cv2
 import numpy as np
+from PySide6.QtCore import QPointF
+from PySide6.QtGui import QPainterPath
+
+from .annotations import AnnotationEdits, Stroke
 from .geometry import inverse
-from .project import Project
+from .project import Marker, Project, decode_asset
 
 
 def make_demo():
@@ -31,7 +35,23 @@ def make_demo():
     cv2.circle(image, (520, 500), 32, (60, 77, 78), -1, cv2.LINE_AA)
     cv2.circle(image, (520, 500), 24, (134, 172, 184), -1, cv2.LINE_AA)
     cv2.circle(image, (520, 500), 12, (91, 127, 134), -1, cv2.LINE_AA)
-    project = Project(image, "演示区域（合成地图）", [[[440., 650.], [480., 570.], [520., 500.], [600., 465.], [680., 430.], [760., 360.]]])
+    project = Project(image, "演示区域（合成地图）")
+    edits = AnnotationEdits(project)
+    for color, points in [
+        (project.color, [(440, 650), (480, 570), (520, 500), (600, 465), (680, 430), (760, 360)]),
+        ("#ffce73", [(520, 500), (585, 528), (643, 556), (720, 600)]),
+    ]:
+        path = QPainterPath(QPointF(*points[0]))
+        for x, y in points[1:]:
+            path.lineTo(x, y)
+        edits.draw(Stroke(path, color))
+    icon = np.zeros((36, 36, 4), np.uint8)
+    cv2.circle(icon, (18, 18), 16, (48, 33, 23, 255), -1, cv2.LINE_AA)
+    cv2.fillConvexPoly(icon, np.array([(18, 7), (29, 18), (18, 29), (7, 18)]),
+                       (115, 206, 255, 255), cv2.LINE_AA)
+    asset = decode_asset(cv2.imencode(".png", icon)[1].tobytes())
+    project.add_marker(Marker(asset, 573, 439))
+    project.add_marker(Marker(asset, 643, 556, 22))
     return project
 
 

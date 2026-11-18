@@ -122,8 +122,8 @@ class SettingsDialog(QDialog):
         self.add_section(general, "窗口行为")
         self.minimize_toggle = self.add_switch(
             general, "开始叠加后自动最小化",
-            "开启后最小化软件窗口，方便查看游戏。\n"
-            "关闭后保持窗口状态，仍会切回游戏。", minimize_on_tracking)
+            "开启后最小化程序并切回游戏。\n"
+            "关闭后保留当前窗口，手动切回游戏即可显示叠加层。", minimize_on_tracking)
         self.add_section(general, "实时预览")
         self.preview_toggle = self.add_switch(
             general, "实时同步小地图",

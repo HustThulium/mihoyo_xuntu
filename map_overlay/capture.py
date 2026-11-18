@@ -11,6 +11,25 @@ from . import native
 from .vision import Localizer, Match, PoseGate
 
 
+class CapturePause:
+    """Pause both workers and wait for any desktop read already in progress."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.revision = 0
+        self.paused = False
+
+    def set_paused(self, paused):
+        with self._lock:
+            if paused != self.paused:
+                self.revision += 1
+            self.paused = paused
+
+    def capture(self, read, *args):
+        with self._lock:
+            return self.revision, None if self.paused else read(*args)
+
+
 def grab(box, session=None):
     x, y, w, h = box
     region = dict(left=x, top=y, width=w, height=h)
@@ -44,11 +63,12 @@ class PreviewWorker(QThread):
     result = Signal(object)
     interval = 1 / 3
 
-    def __init__(self, hwnd, position, generation):
+    def __init__(self, hwnd, position, generation, capture_pause=None):
         super().__init__()
         self.hwnd = hwnd
         self.position = position
         self.generation = generation
+        self.capture_pause = capture_pause if capture_pause is not None else CapturePause()
         self.stop_event = threading.Event()
 
     def stop(self):
@@ -59,8 +79,9 @@ class PreviewWorker(QThread):
             with mss.mss() as screen:
                 while not self.stop_event.is_set():
                     started = time.monotonic()
-                    payload = capture_minimap(self.hwnd, self.position, screen)
-                    self.result.emit(dict(payload, generation=self.generation))
+                    revision, payload = self.capture_pause.capture(capture_minimap, self.hwnd, self.position, screen)
+                    if payload is not None:
+                        self.result.emit(dict(payload, generation=self.generation, capture_revision=revision))
                     self.stop_event.wait(max(.02, self.interval - (time.monotonic() - started)))
         except Exception as exc:
             self.result.emit(dict(generation=self.generation, time=time.monotonic(), image=None,
@@ -70,7 +91,7 @@ class PreviewWorker(QThread):
 class TrackingWorker(QThread):
     result = Signal(object)
 
-    def __init__(self, image, hwnd, position, generation, seed=None):
+    def __init__(self, image, hwnd, position, generation, seed=None, capture_pause=None):
         super().__init__()
         self.image = image
         self.hwnd = hwnd
@@ -79,6 +100,7 @@ class TrackingWorker(QThread):
         self.client_size = position.client_size
         self.generation = generation
         self.seed = seed
+        self.capture_pause = capture_pause if capture_pause is not None else CapturePause()
         self.stop_event = threading.Event()
 
     def stop(self):
@@ -89,8 +111,13 @@ class TrackingWorker(QThread):
             cv_localizer = Localizer(self.image)
             cv_localizer.reset(self.seed)
             gate = PoseGate()
+            previous_revision = None
             with mss.mss() as screen:
                 while not self.stop_event.is_set():
+                    revision = self.capture_pause.revision
+                    if self.capture_pause.paused:
+                        self.stop_event.wait(.10)
+                        continue
                     started = time.monotonic()
                     payload = dict(generation=self.generation, time=started, ready=False,
                                    match=Match(reason="等待目标游戏窗口成为前台"), image=None, box=None)
@@ -106,7 +133,14 @@ class TrackingWorker(QThread):
                     elif native.foreground_is(self.hwnd):
                         native.monitor_for(box)
                         absolute = self.position.absolute_box(box)
-                        image = grab(absolute, screen)
+                        revision, image = self.capture_pause.capture(grab, absolute, screen)
+                        if image is None:
+                            self.stop_event.wait(.10)
+                            continue
+                        if previous_revision is not None and revision != previous_revision:
+                            gate.reset()
+                            cv_localizer.reset()
+                        previous_revision = revision
                         match = cv_localizer.locate(image)
                         ready = gate.accept(match, image.shape)
                         # Never emit an image captured across a window move or focus change.
@@ -119,7 +153,7 @@ class TrackingWorker(QThread):
                     else:
                         gate.reset()
                         cv_localizer.reset()
-                    self.result.emit(payload)
+                    self.result.emit(dict(payload, capture_revision=revision))
                     self.stop_event.wait(max(.02, .10 - (time.monotonic() - started)))
         except Exception as exc:
             self.result.emit(dict(generation=self.generation, time=time.monotonic(), ready=False,

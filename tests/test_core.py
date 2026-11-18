@@ -84,19 +84,25 @@ class PersistenceTests(unittest.TestCase):
             project.save(path)
             loaded = Project.load(path)
             np.testing.assert_array_equal(loaded.image, project.image)
-            self.assertEqual(loaded.strokes, project.strokes)
+            self.assertEqual(loaded.ink, project.ink)
+            self.assertEqual([(m.x, m.y, m.size) for m in loaded.markers],
+                             [(m.x, m.y, m.size) for m in project.markers])
+            self.assertIs(loaded.markers[0].asset, loaded.markers[1].asset)
+            self.assertEqual(loaded.markers[0].asset.png, project.markers[0].asset.png)
             with zipfile.ZipFile(path) as file:
-                payload = json.loads(file.read("project.json"))
-                image = file.read("reference.png")
-            payload["strokes"] = [[[0, 1], [float("nan"), 3]]]
+                self.assertEqual(sum(name.startswith("assets/") for name in file.namelist()), 1)
+                entries = {name: file.read(name) for name in file.namelist()}
+            payload = json.loads(entries["project.json"])
+            payload["markers"][0]["x"] = float("nan")
+            entries["project.json"] = json.dumps(payload)
             with zipfile.ZipFile(path, "w") as file:
-                file.writestr("project.json", json.dumps(payload))
-                file.writestr("reference.png", image)
-            with self.assertRaises(ValueError):
+                for name, content in entries.items():
+                    file.writestr(name, content)
+            with self.assertRaisesRegex(ValueError, "标记坐标"):
                 Project.load(path)
 
     def test_device_fields_in_region_bundle_are_ignored_and_not_exported(self):
-        project = make_demo()
+        project = Project(make_demo().image)
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "bad.routepack"
             project.save(path)
@@ -109,7 +115,7 @@ class PersistenceTests(unittest.TestCase):
                 bundle.writestr("reference.png", image)
             loaded = Project.load(path)
             self.assertFalse(hasattr(loaded, "legacy_minimap"))
-            self.assertEqual(loaded.strokes, project.strokes)
+            self.assertFalse(loaded.has_annotations)
             loaded.save(path)
             with zipfile.ZipFile(path) as bundle:
                 saved = json.loads(bundle.read("project.json"))

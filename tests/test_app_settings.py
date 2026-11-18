@@ -8,12 +8,13 @@ import unittest
 from unittest.mock import patch, Mock
 
 import numpy as np
+import cv2
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtTest import QTest
 
 from map_overlay.app import MainWindow
-from map_overlay.project import Project
+from map_overlay.project import Marker, Project, decode_asset
 from map_overlay.settings import MinimapPosition, MinimapSettings
 from map_overlay.vision import Match
 
@@ -27,8 +28,8 @@ class AppSettingsTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.path = Path(self.temporary.name) / "settings.json"
-        def preview_worker(target, position, generation):
-            return Mock(hwnd=target, position=position, generation=generation)
+        def preview_worker(target, position, generation, capture_pause):
+            return Mock(hwnd=target, position=position, generation=generation, capture_pause=capture_pause)
         patcher = patch("map_overlay.app.PreviewWorker", side_effect=preview_worker)
         self.preview_workers = patcher.start()
         self.addCleanup(patcher.stop)
@@ -49,6 +50,11 @@ class AppSettingsTests(unittest.TestCase):
     def selected_image(self):
         x, y, w, h = self.position.rect
         return self.image[y:y+h, x:x+w]
+
+    def project_with_marker(self):
+        icon = np.full((4, 4, 4), 255, dtype=np.uint8)
+        asset = decode_asset(cv2.imencode(".png", icon)[1].tobytes())
+        return Project(self.image, markers=[Marker(asset, 10, 10)])
 
     def assert_selected_preview(self):
         np.testing.assert_array_equal(self.window.last_preview, self.selected_image())
@@ -123,7 +129,7 @@ class AppSettingsTests(unittest.TestCase):
 
     def test_tracking_uses_local_position_and_rejects_resized_window(self):
         self.window.save_minimap_position(self.position, self.selected_image())
-        self.window.project = Project(self.image, strokes=[[[0, 0], [20, 20]]])
+        self.window.project = self.project_with_marker()
         with patch("map_overlay.app.TrackingWorker") as worker, patch.object(self.window, "showMinimized"):
             self.window.toggle_tracking()
             self.assertEqual(worker.call_args.args[2], self.position)
@@ -136,7 +142,7 @@ class AppSettingsTests(unittest.TestCase):
             self.assertEqual(worker.call_count, 1)
 
     def test_region_alone_does_not_enable_tracking(self):
-        self.window.project = Project(self.image, strokes=[[[0, 0], [20, 20]]])
+        self.window.project = self.project_with_marker()
         with patch("map_overlay.app.TrackingWorker") as worker, patch.object(self.window, "error") as error:
             self.window.toggle_tracking()
         worker.assert_not_called()
@@ -179,7 +185,7 @@ class AppSettingsTests(unittest.TestCase):
     def test_preview_toggle_is_independent_of_tracking_and_survives_restart(self):
         self.window.save_minimap_position(self.position, self.selected_image())
         preview = self.window.preview_worker
-        self.window.project = Project(self.image, strokes=[[[0, 0], [20, 20]]])
+        self.window.project = self.project_with_marker()
         with patch("map_overlay.app.TrackingWorker") as worker, patch.object(self.window, "showMinimized"):
             self.window.toggle_tracking()
             self.assertIs(self.window.preview_worker, preview)
@@ -294,8 +300,8 @@ class AppSettingsTests(unittest.TestCase):
 
     def test_tracking_respects_window_preference_and_preserves_maximization(self):
         self.window.save_minimap_position(self.position, self.selected_image())
-        self.window.project = Project(self.image, strokes=[[[0, 0], [20, 20]]])
-        with patch("map_overlay.app.TrackingWorker"):
+        self.window.project = self.project_with_marker()
+        with patch("map_overlay.app.TrackingWorker") as worker, patch("map_overlay.app.native.focus") as focus:
             for minimize in (True, False):
                 self.window.settings_dialog.minimize_toggle.setChecked(minimize)
                 for maximized in (True, False):
@@ -306,14 +312,122 @@ class AppSettingsTests(unittest.TestCase):
                             self.window.showNormal()
                         self.app.processEvents()
                         geometry = self.window.normalGeometry()
-                        self.window.toggle_tracking()
-                        self.app.processEvents()
-                        self.assertEqual(self.window.isMinimized(), minimize)
-                        self.window.stop_tracking()
+                        focus.reset_mock()
+                        worker.return_value.start.reset_mock()
+                        self.window.track_button.click()
+                        try:
+                            self.app.processEvents()
+                            worker.return_value.start.assert_called_once()
+                            self.assertEqual(self.window.isMinimized(), minimize)
+                            if minimize:
+                                focus.assert_called_once_with(self.window.targets.currentData())
+                            else:
+                                focus.assert_not_called()
+                                self.assertTrue(self.window.isVisible())
+                                self.assertEqual(self.window.isMaximized(), maximized)
+                        finally:
+                            self.window.stop_tracking()
                         self.app.processEvents()
                         self.assertFalse(self.window.isMinimized())
                         self.assertEqual(self.window.isMaximized(), maximized)
                         self.assertEqual(self.window.normalGeometry(), geometry)
+
+    def test_screenshot_switch_waits_for_a_fresh_pose_and_restores_capture(self):
+        window = self.window
+        window.save_minimap_position(self.position, self.selected_image())
+        window.project = self.project_with_marker()
+        window.minimap_settings.minimize_on_tracking = False
+        affinity_calls = []
+
+        def set_capture_excluded(excluded):
+            affinity_calls.append((excluded, window.capture_pause.paused))
+            return True
+
+        with patch("map_overlay.app.TrackingWorker") as tracking, \
+                patch("map_overlay.app.native.foreground_is", return_value=False) as foreground, \
+                patch("map_overlay.widgets.logical_geometry", return_value=(window.rect(), 1.0)), \
+                patch.object(window.overlay, "set_capture_excluded", side_effect=set_capture_excluded):
+            tracking.return_value.hwnd = 123
+            tracking.return_value.position = self.position
+            window.toggle_tracking()
+            window.screenshot_button.click()
+            self.assertTrue(window.screenshot_button.isChecked())
+            self.assertFalse(window.capture_pause.paused)
+            self.assertIn("等待定位", window.screenshot_button.text())
+
+            foreground.return_value = True
+            frame = dict(generation=window.generation, time=time.monotonic(), ready=True,
+                         match=Match(matrix=np.eye(2, 3)), image=self.selected_image(), box=(120, 130, 100, 100))
+            window.receive_frame(frame)
+            self.assertTrue(window.overlay.isVisible())
+            self.assertTrue(window.capture_pause.paused)
+            self.assertIn("路线已冻结", window.state.text())
+            self.assertIs(tracking.call_args.args[-1], window.capture_pause)
+            self.assertIs(window.preview_worker.capture_pause, window.capture_pause)
+            self.assertEqual(affinity_calls, [(True, False), (False, True)])
+            read = Mock()
+            window.capture_pause.capture(read)
+            read.assert_not_called()
+            window.receive_frame(dict(frame, ready=False))
+            self.assertTrue(window.overlay.isVisible())
+
+            window.screenshot_button.click()
+            self.assertFalse(window.capture_pause.paused)
+            self.assertFalse(window.screenshot_button.isChecked())
+            self.assertIn("正在恢复定位", window.state.text())
+            self.assertEqual(affinity_calls[-1], (True, True))
+            self.assertFalse(window.overlay.isVisible())
+            window.receive_frame(frame)
+            self.assertFalse(window.overlay.isVisible())
+            window.receive_frame(dict(frame, capture_revision=window.capture_pause.revision))
+            self.assertTrue(window.overlay.isVisible())
+
+    def test_screenshot_mode_stays_on_when_game_moves_or_loses_focus(self):
+        window = self.window
+        window.save_minimap_position(self.position, self.selected_image())
+        window.project = self.project_with_marker()
+        window.minimap_settings.minimize_on_tracking = False
+        with patch("map_overlay.app.TrackingWorker") as tracking, \
+                patch("map_overlay.app.native.client_box", return_value=(100, 100, 640, 480)) as client, \
+                patch("map_overlay.app.native.foreground_is", return_value=True) as foreground, \
+                patch("map_overlay.widgets.logical_geometry", return_value=(window.rect(), 1.0)), \
+                patch.object(window.overlay, "set_capture_excluded", side_effect=[True, True, True, False]) as affinity, \
+                patch.object(window.overlay, "destroy", side_effect=lambda: self.assertTrue(window.capture_pause.paused)) as destroy:
+            tracking.return_value.hwnd = 123
+            tracking.return_value.position = self.position
+            window.toggle_tracking()
+            window.receive_frame(dict(generation=window.generation, time=time.monotonic(), ready=True,
+                                      match=Match(matrix=np.eye(2, 3)), image=self.selected_image(),
+                                      box=(120, 130, 100, 100)))
+            window.toggle_screenshot_mode()
+            self.assertTrue(window.capture_pause.paused)
+
+            client.return_value = (125, 100, 640, 480)
+            window.expire_overlay()
+            self.assertEqual(window.overlay.capture_box, (145, 130, 100, 100))
+
+            foreground.return_value = False
+            window.last_visible = time.monotonic() - 30
+            window.expire_overlay()
+            self.assertFalse(window.overlay.isVisible())
+            self.assertTrue(window.capture_pause.paused)
+            self.assertTrue(window.screenshot_button.isChecked())
+
+            client.return_value = (125, 100, 800, 600)
+            foreground.return_value = True
+            window.expire_overlay()
+            self.assertFalse(window.overlay.isVisible())
+            self.assertTrue(window.capture_pause.paused)
+            client.return_value = (125, 100, 640, 480)
+            window.expire_overlay()
+            affinity.assert_called_with(False)
+            self.assertTrue(window.overlay.isVisible())
+
+            window.toggle_screenshot_mode()
+            destroy.assert_called_once()
+            self.assertFalse(window.capture_pause.paused)
+            self.assertFalse(window.overlay.isVisible())
+            self.assertFalse(window.screenshot_button.isChecked())
 
     def test_capture_return_preserves_maximized_window(self):
         self.window.showMaximized()
