@@ -2,17 +2,16 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import unittest
-from unittest.mock import patch
 import numpy as np
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt, QPoint, QRect, QRectF
+from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QColor, QImage, QPainter, QTransform
 from PySide6.QtTest import QTest
 
 from map_overlay.annotations import paint_minimap
 from map_overlay.demo import make_demo
 from map_overlay.project import Marker, Project
-from map_overlay.widgets import AnnotationView, CalibrationDialog, DrawingOverlay, RegionDialog
+from map_overlay.widgets import AnnotationView, CalibrationDialog, RegionDialog
 
 
 class WidgetTests(unittest.TestCase):
@@ -93,23 +92,6 @@ class WidgetTests(unittest.TestCase):
                 self.assertGreater(frame.pixelColor(61, 50).alpha(), 0)
                 self.assertEqual(frame.pixelColor(65, 50).alpha(), 0)
                 self.assertEqual(frame.pixelColor(90, 90).alpha(), 0)
-
-    def test_frozen_capture_keeps_each_stroke_color_and_stages_edits(self):
-        project = Project(self.project.image)
-        matrix = np.array([[2, 0, 50], [0, 2, 20]], dtype=float)
-        with patch("map_overlay.widgets.logical_geometry", return_value=(QRect(0, 0, 320, 200), 1.0)):
-            dialog = DrawingOverlay(project.image[:200, :320], (0, 0, 320, 200), project, matrix)
-        self.addCleanup(dialog.close)
-        QTest.mouseClick(dialog, Qt.MouseButton.LeftButton, pos=QPoint(100, 80))
-        with patch("map_overlay.widgets.QColorDialog.getColor", return_value=QColor("#de5317")):
-            dialog.choose_color()
-        QTest.mouseClick(dialog, Qt.MouseButton.LeftButton, pos=QPoint(150, 100))
-        self.assertEqual([stroke.color for stroke in dialog.strokes], [project.color, "#de5317"])
-        self.assertEqual(dialog.strokes[0].path.currentPosition().toTuple(), (250.0, 180.0))
-        dialog.undo()
-        self.assertEqual(len(dialog.strokes), 1)
-        dialog.reject()
-        self.assertIsNone(project.ink)
 
     def test_landmark_pairing_and_error_check(self):
         dialog = CalibrationDialog(self.project.image, self.project.image)

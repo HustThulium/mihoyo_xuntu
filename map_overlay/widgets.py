@@ -6,10 +6,10 @@ import math
 import cv2
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QRect
 from PySide6.QtGui import (QImage, QPixmap, QPainter, QPainterPath, QPen, QColor,
-                           QBrush, QKeySequence, QShortcut, QGuiApplication, QTransform)
+                           QBrush, QGuiApplication, QTransform)
 from PySide6.QtWidgets import (QWidget, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                               QPushButton, QDialogButtonBox, QGraphicsView,
-                              QGraphicsScene, QColorDialog)
+                              QGraphicsScene)
 
 from .annotations import (AnnotationEdits, Stroke, affine_transform, marker_rect,
                           paint_annotations, paint_minimap)
@@ -196,15 +196,6 @@ class AnnotationView(ImageView):
             self.select_marker(None)
             self.changed.emit()
 
-    def commit_strokes(self, strokes):
-        changed = False
-        for stroke in strokes:
-            changed |= self.edits.draw(stroke)
-        if changed:
-            self.changed.emit()
-        self.viewport().update()
-        return changed
-
     def undo(self):
         if self.edits is not None and self.edits.undo():
             self.stroke = None
@@ -287,7 +278,9 @@ class AnnotationView(ImageView):
             if self.stroke is not None:
                 stroke, self.stroke = self.stroke, None
                 stroke.add_point(point)
-                self.commit_strokes((stroke,))
+                if self.edits.draw(stroke):
+                    self.changed.emit()
+                self.viewport().update()
                 return
             if self.drag_start is not None:
                 self.move_marker(point)
@@ -522,93 +515,3 @@ class RouteOverlay(QWidget):
         painter.scale(self.width() / self.pixel_size[0], self.height() / self.pixel_size[1])
         w, h = self.pixel_size
         paint_minimap(painter, self.project, self.matrix, QRectF(0, 0, w, h), self.pixel_ratio)
-
-
-class DrawingOverlay(QDialog):
-    """Draw over a frozen map capture at its original desktop position."""
-
-    def __init__(self, image, box, project, query_to_ref, parent=None):
-        super().__init__(parent, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
-        geometry, self.pixel_ratio = logical_geometry(box)
-        self.setGeometry(geometry)
-        self.background = qimage(image)
-        self.pixel_size = (image.shape[1], image.shape[0])
-        self.project = project
-        self.strokes = []
-        self.query_to_ref = affine_transform(query_to_ref)
-        self.ref_to_query = affine_transform(inverse(query_to_ref))
-        self.color = project.color
-        self.current = None
-        self.setCursor(Qt.CursorShape.CrossCursor)
-        QShortcut(QKeySequence("Ctrl+Z"), self, activated=self.undo)
-        QShortcut(QKeySequence("C"), self, activated=self.choose_color)
-        self.color_button = QPushButton("画笔颜色 (C)", self)
-        self.color_button.clicked.connect(self.choose_color)
-        self.color_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.update_color_button()
-        self.color_button.adjustSize()
-        self.color_button.move(self.width() - self.color_button.width() - 8, 6)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and event.position().y() >= 44:
-            point = self.to_reference(event.position())
-            h, w = self.project.image.shape[:2]
-            if 0 <= point.x() < w and 0 <= point.y() < h:
-                self.current = Stroke(QPainterPath(point), self.color)
-                self.update()
-
-    def to_reference(self, point):
-        query_point = QPointF(point.x() * self.pixel_size[0] / self.width(),
-                              point.y() * self.pixel_size[1] / self.height())
-        return self.query_to_ref.map(query_point)
-
-    def mouseMoveEvent(self, event):
-        if self.current is not None:
-            self.current.add_point(self.to_reference(event.position()))
-            self.update()
-
-    def mouseReleaseEvent(self, event):
-        if self.current is not None and event.button() == Qt.MouseButton.LeftButton:
-            self.current.add_point(self.to_reference(event.position()))
-            self.strokes.append(self.current)
-            self.current = None
-            self.update()
-
-    def undo(self):
-        if self.current is not None:
-            self.current = None
-            self.update()
-        elif self.strokes:
-            self.strokes.pop()
-            self.update()
-
-    def choose_color(self):
-        selected = QColorDialog.getColor(QColor(self.color), self, "画笔颜色")
-        if selected.isValid():
-            self.color = selected.name()
-            self.update_color_button()
-
-    def update_color_button(self):
-        self.color_button.setStyleSheet(f"border-left: 4px solid {self.color};")
-
-    def keyPressEvent(self, event):
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.accept()
-        elif event.key() == Qt.Key.Key_Escape:
-            self.reject()
-        else:
-            super().keyPressEvent(event)
-
-    def paintEvent(self, _):
-        painter = QPainter(self)
-        painter.drawImage(self.rect(), self.background)
-        painter.save()
-        w, h = self.pixel_size
-        painter.scale(self.width() / w, self.height() / h)
-        strokes = self.strokes + ([self.current] if self.current is not None else [])
-        paint_annotations(painter, self.project, self.ref_to_query, QRectF(0, 0, w, h), self.pixel_ratio, strokes)
-        painter.restore()
-        painter.fillRect(0, 0, self.width(), 44, QColor(8, 17, 24, 225))
-        painter.setPen(QColor("#e7f4f2"))
-        painter.drawText(QRect(14, 0, self.color_button.x() - 22, 44), Qt.AlignmentFlag.AlignVCenter,
-                         "Enter 确认 · Esc 取消 · Ctrl+Z 撤销")

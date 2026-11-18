@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 import time
 
-import numpy as np
 from PySide6.QtCore import Qt, QTimer, QStandardPaths, QRectF
 from PySide6.QtGui import QPainter, QPixmap, QKeySequence, QShortcut, QColor
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
@@ -19,7 +18,7 @@ from .project import Project, read_image, read_marker_asset, MIN_MARKER_SIZE, MA
 from .settings import MinimapPosition, MinimapSettings
 from .settings_ui import SettingsDialog
 from .vision import Localizer
-from .widgets import (AnnotationView, RegionDialog, CalibrationDialog, DrawingOverlay,
+from .widgets import (AnnotationView, RegionDialog, CalibrationDialog,
                       RouteOverlay, MinimapSettingsDialog, qimage)
 
 
@@ -138,18 +137,12 @@ class MainWindow(QMainWindow):
         side.addWidget(self.minimap_status)
         section("02  准备区域与路线")
         button("从游戏大地图建立区域", self.new_capture, True)
-        row = QHBoxLayout()
-        for text, callback in [("导入底图", self.import_reference), ("打开区域", self.open_project)]:
-            item = QPushButton(text)
-            item.clicked.connect(callback)
-            row.addWidget(item)
-        side.addLayout(row)
-        button("在游戏地图上画线  Ctrl+Alt+F8", self.draw_on_game)
+        button("打开区域", self.open_project)
         row = QHBoxLayout()
         for text, callback in [("保存区域", self.save_project), ("撤销", lambda: self.canvas.undo())]:
             item = QPushButton(text)
             item.clicked.connect(callback)
-            row.addWidget(item)
+            row.addWidget(item, 1)
         side.addLayout(row)
         section("03  小地图定位与叠加")
         button("辅助校准：选择对应地标", self.calibrate_minimap)
@@ -159,7 +152,6 @@ class MainWindow(QMainWindow):
         self.screenshot_button.setCheckable(True)
         self.screenshot_button.setEnabled(False)
         self.screenshot_button.setToolTip("暂停定位并允许截图。再次点击或按快捷键恢复定位。")
-        button("停止并返回  Ctrl+Alt+F10", self.stop_tracking)
         section("离线验证")
         button("测试一张小地图截图", self.test_image)
         button("加载离线演示（合成地图）", self.load_demo)
@@ -178,7 +170,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(sidebar)
 
         content = QVBoxLayout()
-        self.area_label = QLabel("还没有区域 · 从游戏截取或导入一张底图")
+        self.area_label = QLabel("还没有区域 · 从游戏大地图建立或打开已有区域")
         self.area_label.setStyleSheet("font-size:16px; font-weight:600;")
         content.addWidget(self.area_label)
         tools = QHBoxLayout()
@@ -242,7 +234,7 @@ class MainWindow(QMainWindow):
         self.metrics.setWordWrap(True)
         self.metrics.setObjectName("muted")
         info.addWidget(self.metrics)
-        self.detail = QLabel("画笔模式下拖动画线。标记模式下可以选中图标并拖动，或调整大小。\n浏览模式下拖动地图，滚轮缩放。冻结画面可按 Enter 确认、Esc 取消。")
+        self.detail = QLabel("画笔模式下拖动画线。标记模式下可以选中图标并拖动，或调整大小。\n浏览模式下拖动地图，滚轮缩放。")
         self.detail.setObjectName("muted")
         self.detail.setWordWrap(True)
         info.addWidget(self.detail)
@@ -482,7 +474,7 @@ class MainWindow(QMainWindow):
 
     def require_project(self):
         if self.project is None:
-            raise ValueError("请先建立区域、导入底图或打开已有区域文件。")
+            raise ValueError("请先从游戏大地图建立区域，或打开已有区域文件。")
 
     def capture_action(self, callback):
         if self.busy:
@@ -529,68 +521,20 @@ class MainWindow(QMainWindow):
         if not self.confirm_discard():
             return
 
-        def received(image, box):
+        def received(image, _box):
             selector = RegionDialog(image)
             if selector.exec() != QDialogAccepted:
                 return
-            x, y, w, h = selector.rect
-            selected = image[y:y+h, x:x+w].copy()
             name, ok = QInputDialog.getText(None, "区域名称", "给这个跑图区域起一个名字：", text="我的收集路线")
             if not ok:
                 return
+            x, y, w, h = selector.rect
+            selected = image[y:y+h, x:x+w].copy()
             project = Project(selected, name.strip() or "未命名区域")
             project.target_title = self.targets.currentText()
             self.set_project(project)
-            absolute = (box[0] + x, box[1] + y, w, h)
-            self.edit_capture(selected, absolute, np.array([[1., 0., 0.], [0., 1., 0.]]))
 
         self.capture_action(received)
-
-    def edit_capture(self, image, box, matrix):
-        editor = DrawingOverlay(image, box, self.project, matrix)
-        if editor.exec() == QDialogAccepted:
-            color_changed = self.project.color != editor.color
-            self.project.color = editor.color
-            self.refresh_brush_color()
-            if not self.canvas.commit_strokes(editor.strokes) and color_changed:
-                self.annotations_changed()
-
-    def draw_on_game(self):
-        if self.busy:
-            return
-        try:
-            self.require_project()
-        except ValueError as exc:
-            self.error(exc)
-            return
-
-        def received(image, box):
-            selector = RegionDialog(image)
-            selector.setWindowTitle("框选当前可见地图 · 识别后继续画线")
-            if selector.exec() != QDialogAccepted:
-                return
-            x, y, w, h = selector.rect
-            query = image[y:y+h, x:x+w].copy()
-            match = self.localizer.locate(query, mini=False)
-            matrix = match.matrix
-            if matrix is None:
-                dialog = CalibrationDialog(self.project.image, query)
-                if dialog.exec() != QDialogAccepted:
-                    return
-                matrix = dialog.matrix
-            self.edit_capture(query, (box[0] + x, box[1] + y, w, h), matrix)
-
-        self.capture_action(received)
-
-    def import_reference(self):
-        if not self.confirm_discard():
-            return
-        path, _ = QFileDialog.getOpenFileName(self, "导入清晰的局部地图", "", "地图图片 (*.png *.jpg *.jpeg *.bmp)")
-        if path:
-            try:
-                self.set_project(Project(read_image(path), Path(path).stem))
-            except Exception as exc:
-                self.error(exc)
 
     def open_project(self, path=None):
         if not self.confirm_discard():
@@ -738,7 +682,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.error(exc)
 
-    def stop_tracking(self, checked=False, show=True):
+    def stop_tracking(self, show=True):
         self.end_screenshot_mode()
         self.screenshot_button.setEnabled(False)
         self.overlay.hide()
@@ -947,7 +891,7 @@ class MainWindow(QMainWindow):
         key = native.hotkey_message(message)
         if key and not self.busy and not self.settings_dialog.isVisible():
             # Queue actions after the native event, so modal dialogs do not nest here.
-            action = {1: self.draw_on_game, 2: self.toggle_tracking, 3: self.stop_tracking,
+            action = {2: self.toggle_tracking,
                       native.SCREENSHOT_HOTKEY: self.toggle_screenshot_mode}.get(key)
             if action:
                 QTimer.singleShot(0, action)

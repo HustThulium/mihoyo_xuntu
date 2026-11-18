@@ -112,7 +112,7 @@ def monitor_for(box, with_handle=False):
 
 
 SCREENSHOT_HOTKEY = 4
-HOTKEYS = {1: 0x77, 2: 0x78, 3: 0x79, SCREENSHOT_HOTKEY: 0x7A}  # F8 through F11
+HOTKEYS = {2: 0x78, SCREENSHOT_HOTKEY: 0x7A}  # F9 and F11
 
 
 def register_hotkeys(hwnd):

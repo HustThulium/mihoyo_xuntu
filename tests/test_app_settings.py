@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
-from unittest.mock import patch, Mock
+from unittest.mock import call, patch, Mock
 
 import numpy as np
 import cv2
@@ -13,10 +13,21 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtTest import QTest
 
+from map_overlay import native
 from map_overlay.app import MainWindow
 from map_overlay.project import Marker, Project, decode_asset
 from map_overlay.settings import MinimapPosition, MinimapSettings
 from map_overlay.vision import Match
+
+
+class NativeHotkeyTests(unittest.TestCase):
+    def test_global_shortcuts_register_overlay_actions(self):
+        with patch.object(native.user32, "RegisterHotKey", return_value=True) as register:
+            self.assertEqual(native.register_hotkeys(123), [2, 4])
+        self.assertEqual(register.call_args_list, [
+            call(123, 2, 0x4003, 0x78),
+            call(123, 4, 0x4003, 0x7A),
+        ])
 
 
 class AppSettingsTests(unittest.TestCase):
@@ -326,7 +337,7 @@ class AppSettingsTests(unittest.TestCase):
                                 self.assertTrue(self.window.isVisible())
                                 self.assertEqual(self.window.isMaximized(), maximized)
                         finally:
-                            self.window.stop_tracking()
+                            self.window.track_button.click()
                         self.app.processEvents()
                         self.assertFalse(self.window.isMinimized())
                         self.assertEqual(self.window.isMaximized(), maximized)
@@ -428,6 +439,26 @@ class AppSettingsTests(unittest.TestCase):
             self.assertFalse(window.capture_pause.paused)
             self.assertFalse(window.overlay.isVisible())
             self.assertFalse(window.screenshot_button.isChecked())
+
+    def test_new_capture_opens_cropped_region_in_main_editor(self):
+        with patch("map_overlay.app.QTimer.singleShot", side_effect=lambda delay, callback: callback()), \
+                patch("map_overlay.app.native.foreground_is", return_value=True), \
+                patch("map_overlay.app.grab", return_value=self.image), \
+                patch("map_overlay.app.RegionDialog") as selector, \
+                patch("map_overlay.app.QInputDialog.getText", return_value=(" 测试区域 ", True)):
+            selector.return_value.exec.return_value = 1
+            selector.return_value.rect = [20, 30, 250, 200]
+            self.window.new_capture()
+
+        project = self.window.project
+        np.testing.assert_array_equal(project.image, self.image[30:230, 20:270])
+        self.assertEqual(project.name, "测试区域")
+        self.assertEqual(project.target_title, "测试窗口")
+        self.assertFalse(project.has_annotations)
+        self.assertIs(self.window.canvas.project, project)
+        self.assertIsNone(self.window.project_path)
+        self.assertTrue(self.window.dirty)
+        self.assertTrue(self.window.isVisible())
 
     def test_capture_return_preserves_maximized_window(self):
         self.window.showMaximized()

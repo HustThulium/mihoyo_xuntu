@@ -64,19 +64,19 @@ class Localizer:
         self.previous = seed
         self.failures = 0
 
-    def locate(self, query, mini=True):
+    def locate(self, query):
         start = time.perf_counter()
         self.frames += 1
-        scale = min(1.0, (900 if mini else 1800) / max(query.shape[:2]))
+        scale = min(1.0, 900 / max(query.shape[:2]))
         work = cv2.resize(query, None, fx=scale, fy=scale) if scale < 1 else query
-        mask = minimap_mask(work) if mini else None
+        mask = minimap_mask(work)
         keypoints, descriptors = self.detector.detectAndCompute(gray(work), mask)
         points = np.array([p.pt for p in keypoints], np.float32).reshape(-1, 2) / scale
         result = Match(reason="地形特征不足，请换清晰底图或辅助校准")
         if descriptors is not None and len(points) >= 8 and self.full_matcher is not None:
             # Reacquisition periodically uses the whole saved region as a guard
             # against locking onto a repeated nearby texture indefinitely.
-            if mini and self.previous is not None and self.failures < 3 and self.frames % 30:
+            if self.previous is not None and self.failures < 3 and self.frames % 30:
                 h, w = query.shape[:2]
                 center = transform_points([[w / 2, h / 2]], self.previous)[0]
                 factor = np.linalg.norm(self.previous[:, 0])
@@ -84,22 +84,21 @@ class Localizer:
                 chosen = np.where((np.abs(self.points - center) < radius).all(axis=1))[0]
                 if len(chosen) >= 12:
                     matcher = self._make_matcher(self.descriptors[chosen])
-                    result = self._match(points, descriptors, self.points[chosen], matcher, query.shape, mini)
+                    result = self._match(points, descriptors, self.points[chosen], matcher, query.shape)
                     result.scope = "附近"
             if not result.ok:
-                result = self._match(points, descriptors, self.points, self.full_matcher, query.shape, mini)
-            if mini:
-                if result.ok:
-                    self.previous = result.matrix.copy()
-                    self.failures = 0
-                else:
-                    self.failures += 1
-                    if self.failures >= 3:
-                        self.previous = None
+                result = self._match(points, descriptors, self.points, self.full_matcher, query.shape)
+            if result.ok:
+                self.previous = result.matrix.copy()
+                self.failures = 0
+            else:
+                self.failures += 1
+                if self.failures >= 3:
+                    self.previous = None
         result.elapsed_ms = (time.perf_counter() - start) * 1000
         return result
 
-    def _match(self, query_points, descriptors, ref_points, matcher, shape, mini):
+    def _match(self, query_points, descriptors, ref_points, matcher, shape):
         if matcher is None:
             return Match(reason="底图特征不足")
         pairs = matcher.knnMatch(descriptors, k=2)
