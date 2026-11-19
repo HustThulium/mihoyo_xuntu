@@ -3,18 +3,20 @@ from __future__ import annotations
 from pathlib import Path
 import time
 
-from PySide6.QtCore import Qt, QTimer, QStandardPaths, QRectF
+from PySide6.QtCore import Qt, QTimer, QStandardPaths, QRectF, QSignalBlocker
 from PySide6.QtGui import QPainter, QPixmap, QKeySequence, QShortcut, QColor
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
                               QVBoxLayout, QPushButton, QLabel, QFileDialog,
                               QMessageBox, QComboBox, QSplitter, QFrame,
-                              QInputDialog, QColorDialog, QSpinBox)
+                              QInputDialog, QColorDialog, QSpinBox, QSlider)
 
 from . import native
 from .annotations import affine_transform, paint_minimap
 from .capture import CapturePause, TrackingWorker, PreviewWorker, grab
 from .geometry import inverse
 from .project import Project, read_image, read_marker_asset, MIN_MARKER_SIZE, MAX_MARKER_SIZE
+from .route_import import RouteExtraction
+from .route_import_ui import RouteAreaDialog, RouteMatchDialog, RoutePreviewDialog
 from .settings import MinimapPosition, MinimapSettings
 from .settings_ui import SettingsDialog
 from .vision import Localizer
@@ -32,7 +34,8 @@ QPushButton { background:#1a2a37; border:1px solid #2b4050; border-radius:7px; p
 QPushButton:hover { background:#223b49; border-color:#4b9e8d; }
 QPushButton:disabled { color:#526574; border-color:#22313d; }
 QPushButton#primary { background:#22745f; border-color:#32987d; color:white; font-weight:600; }
-QPushButton#primary:hover { background:#2d8c73; }
+QPushButton#primary:enabled:hover { background:#2d8c73; }
+QPushButton#primary:disabled { background:#252a2e; border-color:#383e43; color:#92999e; }
 QPushButton#screenshotMode:checked { background:#28483f; border-color:#32987d; color:#e7f4f2; }
 QPushButton#settingsButton { padding:0; text-align:center; font-family:'Segoe UI Symbol'; font-size:21px; }
 QComboBox { background:#1a2a37; border:1px solid #2b4050; border-radius:6px; padding:7px; }
@@ -64,7 +67,6 @@ class MainWindow(QMainWindow):
         self.last_visible = 0.0
         self.capture_pause = CapturePause()
         self.screenshot_pending = False
-        self.overlay = RouteOverlay()
         self.last_preview = None
         self.last_preview_matrix = None
         self.minimap_preview = None
@@ -72,6 +74,7 @@ class MainWindow(QMainWindow):
         if settings_path is None:
             settings_path = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)) / "settings.json"
         self.minimap_settings = MinimapSettings(settings_path)
+        self.overlay = RouteOverlay(self.minimap_settings.ink_opacity / 100)
         self.build_ui()
         self.refresh_windows()
         self.registered = native.register_hotkeys(int(self.winId()))
@@ -138,6 +141,7 @@ class MainWindow(QMainWindow):
         section("02  准备区域与路线")
         button("从游戏大地图建立区域", self.new_capture, True)
         button("打开区域", self.open_project)
+        self.import_route_button = button("导入路线图…", self.import_route)
         row = QHBoxLayout()
         for text, callback in [("保存区域", self.save_project), ("撤销", lambda: self.canvas.undo())]:
             item = QPushButton(text)
@@ -172,7 +176,23 @@ class MainWindow(QMainWindow):
         content = QVBoxLayout()
         self.area_label = QLabel("还没有区域 · 从游戏大地图建立或打开已有区域")
         self.area_label.setStyleSheet("font-size:16px; font-weight:600;")
-        content.addWidget(self.area_label)
+        area_row = QHBoxLayout()
+        area_row.addWidget(self.area_label, 1)
+        area_row.addWidget(QLabel("小地图墨迹不透明度"))
+        self.ink_slider = QSlider(Qt.Orientation.Horizontal)
+        self.ink_slider.setAccessibleName("小地图墨迹不透明度")
+        self.ink_slider.setToolTip("向右拖动让墨迹更清晰，100% 为完全不透明")
+        self.ink_slider.setRange(0, 100)
+        self.ink_slider.setFixedWidth(130)
+        self.ink_slider.setValue(self.minimap_settings.ink_opacity)
+        self.ink_slider.setTracking(False)
+        self.ink_percentage = QLabel(f"{self.ink_slider.value()}%")
+        self.ink_percentage.setMinimumWidth(self.ink_percentage.fontMetrics().horizontalAdvance("100%"))
+        self.ink_slider.sliderMoved.connect(self.show_ink_opacity)
+        self.ink_slider.valueChanged.connect(self.save_ink_opacity)
+        area_row.addWidget(self.ink_slider)
+        area_row.addWidget(self.ink_percentage)
+        content.addLayout(area_row)
         tools = QHBoxLayout()
         self.canvas = AnnotationView()
         self.mode = QComboBox()
@@ -295,6 +315,25 @@ class MainWindow(QMainWindow):
     def update_minimap_status(self):
         status = self.minimap_settings.status(self.current_client_size())
         self.minimap_status.setText(status)
+
+    def show_ink_opacity(self, value):
+        self.ink_percentage.setText(f"{value}%")
+        self.overlay.ink_opacity = value / 100
+        self.overlay.update()
+        if self.last_preview_matrix is not None:
+            self.update_preview(self.last_preview, self.last_preview_matrix)
+
+    def save_ink_opacity(self, value):
+        try:
+            self.minimap_settings.save_ink_opacity(value)
+        except (OSError, ValueError) as exc:
+            value = self.minimap_settings.ink_opacity
+            with QSignalBlocker(self.ink_slider):
+                self.ink_slider.setValue(value)
+            self.show_ink_opacity(value)
+            self.error(exc)
+            return
+        self.show_ink_opacity(value)
 
     def toggle_preview(self, enabled):
         try:
@@ -441,6 +480,7 @@ class MainWindow(QMainWindow):
         self.mode.setEnabled(active)
         self.brush_button.setEnabled(active)
         self.import_marker_button.setEnabled(active)
+        self.import_route_button.setEnabled(active)
         self.refresh_brush_color()
         self.marker_selection_changed(None)
 
@@ -471,6 +511,58 @@ class MainWindow(QMainWindow):
                 self.canvas.prepare_marker(asset)
         except (ValueError, OSError) as exc:
             self.error(exc)
+
+    def import_route(self):
+        if self.busy or self.project is None:
+            return
+        self.busy = True
+        area = None
+        try:
+            path, _ = QFileDialog.getOpenFileName(self, "导入路线图", "", "路线图 (*.png *.jpg *.jpeg *.bmp)")
+            if not path:
+                return
+            source = read_image(path)
+            area = RouteAreaDialog(source, self)
+            while area.exec() == QDialogAccepted:
+                selected = source
+                if area.rect:
+                    x, y, w, h = area.rect
+                    selected = source[y:y+h, x:x+w]
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                try:
+                    match = self.localizer.register_route(selected)
+                except ValueError:
+                    match = None
+                finally:
+                    QApplication.restoreOverrideCursor()
+                confirmation = RouteMatchDialog(selected, self.project.image, match, area)
+                accepted = confirmation.exec() == QDialogAccepted
+                reselect = confirmation.reselect
+                confirmation.deleteLater()
+                if reselect:
+                    continue
+                if not accepted or match is None:
+                    break
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                try:
+                    extraction = RouteExtraction(self.project.image, selected, match.matrix, match.route_clip)
+                    preview = RoutePreviewDialog(extraction, self.project, area)
+                finally:
+                    QApplication.restoreOverrideCursor()
+                if preview.exec() == QDialogAccepted:
+                    self.canvas.edits.merge_ink(extraction.origin, preview.view.ink)
+                    self.canvas.viewport().update()
+                    self.canvas.changed.emit()
+                    self.statusBar().showMessage("已合入墨迹，可撤销本次导入。点击「保存区域」写入文件。")
+                if not preview.reselect:
+                    break
+                preview.deleteLater()
+        except Exception as exc:
+            self.error(exc)
+        finally:
+            self.busy = False
+            if area is not None:
+                area.deleteLater()
 
     def require_project(self):
         if self.project is None:
@@ -846,7 +938,8 @@ class MainWindow(QMainWindow):
         if matrix is not None and self.project:
             h, w = image.shape[:2]
             with QPainter(rendered) as painter:
-                paint_minimap(painter, self.project, affine_transform(inverse(matrix)), QRectF(0, 0, w, h))
+                paint_minimap(painter, self.project, affine_transform(inverse(matrix)), QRectF(0, 0, w, h),
+                              ink_opacity=self.overlay.ink_opacity)
         self.preview.setPixmap(QPixmap.fromImage(rendered).scaled(204, 204, Qt.AspectRatioMode.KeepAspectRatio,
                                                                   Qt.TransformationMode.SmoothTransformation))
 

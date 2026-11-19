@@ -8,6 +8,9 @@ from pathlib import Path
 import tempfile
 
 
+DEFAULT_INK_OPACITY = 70
+
+
 @dataclass(frozen=True)
 class MinimapPosition:
     rect: tuple[int, int, int, int]
@@ -51,6 +54,7 @@ class MinimapSettings:
         self.position = None
         self.preview_enabled = True
         self.minimize_on_tracking = True
+        self.ink_opacity = DEFAULT_INK_OPACITY
         self.load_error = None
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
@@ -66,6 +70,14 @@ class MinimapSettings:
             self.position = MinimapPosition.from_payload(position) if position is not None else None
             self.preview_enabled = enabled
             self.minimize_on_tracking = minimize
+            opacity = payload.get("ink_opacity")
+            if "ink_opacity" not in payload:
+                transparency = payload.get("ink_transparency")
+                # Older versions also wrote their default when saving unrelated settings.
+                if type(transparency) is int and 0 <= transparency <= 100 and transparency != 60:
+                    opacity = 100 - transparency
+            if type(opacity) is int and 0 <= opacity <= 100:
+                self.ink_opacity = opacity
         except FileNotFoundError:
             pass
         except (OSError, ValueError, TypeError) as exc:
@@ -86,9 +98,17 @@ class MinimapSettings:
             raise ValueError("开始叠加后自动最小化开关无效。")
         self._save(self.position, self.preview_enabled, enabled)
 
-    def _save(self, position, preview_enabled, minimize_on_tracking):
+    def save_ink_opacity(self, value):
+        if type(value) is not int or not 0 <= value <= 100:
+            raise ValueError("墨迹不透明度应在 0% 到 100% 之间。")
+        self._save(self.position, self.preview_enabled, self.minimize_on_tracking, value)
+
+    def _save(self, position, preview_enabled, minimize_on_tracking, ink_opacity=None):
+        if ink_opacity is None:
+            ink_opacity = self.ink_opacity
         payload = dict(version=1, minimap=position.to_payload() if position else None,
-                       preview_enabled=preview_enabled, minimize_on_tracking=minimize_on_tracking)
+                       preview_enabled=preview_enabled, minimize_on_tracking=minimize_on_tracking,
+                       ink_opacity=ink_opacity)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
         try:
@@ -102,6 +122,7 @@ class MinimapSettings:
         self.position = position
         self.preview_enabled = preview_enabled
         self.minimize_on_tracking = minimize_on_tracking
+        self.ink_opacity = ink_opacity
         self.load_error = None
 
     def require_position(self, client_size):

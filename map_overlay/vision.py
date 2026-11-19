@@ -18,6 +18,14 @@ class Match:
     elapsed_ms: float = 0
     reason: str = "未定位"
     scope: str = "区域"
+    route_landmarks: np.ndarray | None = None  # accepted points, in the selected route image
+
+    @property
+    def route_clip(self):
+        """Avoid extrapolating a small inset's transform across a whole collage."""
+        if self.route_landmarks is not None and self.coverage < .25:
+            return cv2.convexHull(self.route_landmarks).reshape(-1, 2)
+        return None
 
     @property
     def ok(self):
@@ -98,7 +106,19 @@ class Localizer:
         result.elapsed_ms = (time.perf_counter() - start) * 1000
         return result
 
-    def _match(self, query_points, descriptors, ref_points, matcher, shape):
+    def register_route(self, image):
+        """Register a rectangular still image without changing live tracking state."""
+        scale = min(1.0, 2400 / max(image.shape[:2]))
+        work = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else image
+        keys, descriptors = self.detector.detectAndCompute(gray(work), None)
+        if descriptors is not None and len(keys) >= 8:
+            points = np.float32([key.pt for key in keys]) / scale
+            match = self._match(points, descriptors, self.points, self.full_matcher, image.shape, still=True)
+            if match.ok:
+                return match
+        raise ValueError("无法可靠对齐。请框选同一地图上的单个区域，并保留路线周围的地形。")
+
+    def _match(self, query_points, descriptors, ref_points, matcher, shape, still=False):
         if matcher is None:
             return Match(reason="底图特征不足")
         pairs = matcher.knnMatch(descriptors, k=2)
@@ -137,16 +157,19 @@ class Localizer:
         angle = np.degrees(np.arctan2(matrix[1, 0], matrix[0, 0]))
         center = transform_points([[w / 2, h / 2]], matrix)[0]
         result.error, result.coverage = error, coverage
-        if coverage < 0.025 or min(span) < 0.18:
+        has_local_support = still and count >= 20 and hull_area >= 1024 and min(np.ptp(src[accepted], axis=0)) >= 32
+        if (coverage < 0.025 or min(span) < 0.18) and not has_local_support:
             result.reason = "地标过于集中，已隐藏路线"
         elif error > 2.5 or not 0.04 < ratio < 30:
             result.reason = "比例或误差异常，已隐藏路线"
-        elif abs(angle) > 8:
+        elif not still and abs(angle) > 8:
             result.reason = "仅支持固定朝北地图，请检查方向设置"
-        elif not (0 <= center[0] < self.shape[1] and 0 <= center[1] < self.shape[0]):
+        elif not still and not (0 <= center[0] < self.shape[1] and 0 <= center[1] < self.shape[0]):
             result.reason = "当前位置超出已保存区域"
         else:
             result.matrix = matrix
+            if still:
+                result.route_landmarks = src[accepted]
             result.reason = "已定位"
         return result
 

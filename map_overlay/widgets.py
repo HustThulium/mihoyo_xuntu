@@ -469,7 +469,7 @@ def logical_geometry(box):
 
 
 class RouteOverlay(QWidget):
-    def __init__(self):
+    def __init__(self, ink_opacity=1.0):
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint |
                          Qt.WindowType.Tool | Qt.WindowType.WindowTransparentForInput |
                          Qt.WindowType.WindowDoesNotAcceptFocus)
@@ -479,6 +479,7 @@ class RouteOverlay(QWidget):
         self.matrix = None
         self.pixel_size = (1, 1)
         self.pixel_ratio = 1.0
+        self.ink_opacity = ink_opacity
         self.capture_box = None
 
     def display(self, box, project, query_to_ref):
@@ -514,4 +515,4 @@ class RouteOverlay(QWidget):
         painter = QPainter(self)
         painter.scale(self.width() / self.pixel_size[0], self.height() / self.pixel_size[1])
         w, h = self.pixel_size
-        paint_minimap(painter, self.project, self.matrix, QRectF(0, 0, w, h), self.pixel_ratio)
+        paint_minimap(painter, self.project, self.matrix, QRectF(0, 0, w, h), self.pixel_ratio, self.ink_opacity)

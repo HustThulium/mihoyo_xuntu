@@ -50,11 +50,12 @@ def marker_rect(marker, center, units_per_pixel=1.0):
 
 
 def paint_annotations(painter, project, ref_to_view, visible, units_per_pixel=1.0,
-                      strokes=(), markers=None):
+                      strokes=(), markers=None, ink_opacity=1.0):
     painter.save()
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
     if project.ink is not None or strokes:
         painter.save()
+        painter.setOpacity(painter.opacity() * ink_opacity)
         painter.setWorldTransform(ref_to_view, combine=True)
         h, w = project.image.shape[:2]
         painter.setClipRect(QRectF(0, 0, w, h), Qt.ClipOperation.IntersectClip)
@@ -63,22 +64,26 @@ def paint_annotations(painter, project, ref_to_view, visible, units_per_pixel=1.
         for stroke in strokes:
             paint_stroke(painter, stroke)
         painter.restore()
-    for marker in project.markers if markers is None else markers:
+    paint_markers(painter, project.markers if markers is None else markers, ref_to_view, visible, units_per_pixel)
+    painter.restore()
+
+
+def paint_markers(painter, markers, ref_to_view, visible, units_per_pixel):
+    for marker in markers:
         center = ref_to_view.map(QPointF(marker.x, marker.y))
         rect = marker_rect(marker, center, units_per_pixel)
         if visible.intersects(rect):
             painter.drawImage(rect, marker.asset.image)
-    painter.restore()
 
 
-def paint_minimap(painter, project, ref_to_view, frame, units_per_pixel=1.0):
+def paint_minimap(painter, project, ref_to_view, frame, units_per_pixel=1.0, ink_opacity=1.0):
     painter.save()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     clip = QPainterPath()
     radius = min(frame.width(), frame.height()) * .445
     clip.addEllipse(frame.center(), radius, radius)
     painter.setClipPath(clip, Qt.ClipOperation.IntersectClip)
-    paint_annotations(painter, project, ref_to_view, clip.boundingRect(), units_per_pixel)
+    paint_annotations(painter, project, ref_to_view, clip.boundingRect(), units_per_pixel, ink_opacity=ink_opacity)
     painter.restore()
 
 
@@ -128,6 +133,22 @@ class AnnotationEdits:
             with QPainter(self.project.ink) as painter:
                 painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
                 painter.drawImage(rect.topLeft(), before)
+
+    def merge_ink(self, origin, image):
+        h, w = self.project.image.shape[:2]
+        x, y = origin
+        rect = QRect(x, y, image.width(), image.height())
+        if not QRect(0, 0, w, h).contains(rect):
+            raise ValueError("导入墨迹超出了底图范围。")
+        before = None
+        if self.project.ink is None:
+            self.project.ink = QImage(w, h, INK_FORMAT)
+            self.project.ink.fill(Qt.GlobalColor.transparent)
+        else:
+            before = self.project.ink.copy(rect)
+        with QPainter(self.project.ink) as painter:
+            painter.drawImage(x, y, image)
+        self.remember(partial(self.restore_ink, rect, before), before.sizeInBytes() if before else 0)
 
     def add_marker(self, marker):
         index = len(self.project.markers)

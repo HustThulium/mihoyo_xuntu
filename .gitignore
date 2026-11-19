@@ -9,5 +9,7 @@ dist/
 projects/
 # Internal research, plans, validation records and work notes stay local.
 /docs/
+# Local route import samples and validation previews.
+/导入叠加层样例图/
 *.routepack
 *.log

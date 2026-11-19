@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -87,6 +88,22 @@ class MinimapSettingsTests(unittest.TestCase):
         self.assertTrue(settings.preview_enabled)
         self.assertTrue(settings.minimize_on_tracking)
         self.assertEqual(settings.position, self.position)
+
+    def test_legacy_transparency_migrates_once_and_prefers_saved_opacity(self):
+        self.path.parent.mkdir()
+        for fields, expected in [({}, 70), ({"ink_transparency": 60}, 70),
+                                 ({"ink_transparency": 25}, 75), ({"ink_transparency": 100}, 0),
+                                 ({"ink_transparency": 0}, 100), ({"ink_transparency": False}, 70),
+                                 ({"ink_transparency": 25, "ink_opacity": 35}, 35)]:
+            with self.subTest(fields=fields):
+                self.path.write_text(json.dumps(dict(version=1, **fields)), encoding="utf-8")
+                settings = MinimapSettings(self.path)
+                self.assertEqual(settings.ink_opacity, expected)
+                settings.save_position(self.position)
+                saved = json.loads(self.path.read_text(encoding="utf-8"))
+                self.assertNotIn("ink_transparency", saved)
+                self.assertEqual(saved["ink_opacity"], expected)
+                self.assertEqual(MinimapSettings(self.path).ink_opacity, expected)
 
     def test_window_preference_survives_restart_and_other_settings_updates(self):
         settings = MinimapSettings(self.path)

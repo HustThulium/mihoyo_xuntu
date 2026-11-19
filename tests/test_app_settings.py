@@ -11,6 +11,7 @@ import numpy as np
 import cv2
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QEvent, QTimer, Qt
+from PySide6.QtGui import QColor, QImage, QTransform
 from PySide6.QtTest import QTest
 
 from map_overlay import native
@@ -66,6 +67,44 @@ class AppSettingsTests(unittest.TestCase):
         icon = np.full((4, 4, 4), 255, dtype=np.uint8)
         asset = decode_asset(cv2.imencode(".png", icon)[1].tobytes())
         return Project(self.image, markers=[Marker(asset, 10, 10)])
+
+    def test_ink_slider_renders_while_dragging_and_remembers_release(self):
+        window = self.window
+        black = np.zeros((100, 100, 3), np.uint8)
+        ink = QImage(100, 100, QImage.Format.Format_ARGB32_Premultiplied)
+        ink.fill(QColor("red"))
+        asset = self.project_with_marker().markers[0].asset
+        window.project = Project(black, ink=ink, markers=[Marker(asset, 72, 50, 8)])
+        window.update_preview(black, np.eye(2, 3))
+        overlay = window.overlay
+        overlay.project = window.project
+        overlay.matrix = QTransform()
+        overlay.resize(100, 100)
+        overlay.pixel_size = (100, 100)
+
+        def check_render(red):
+            preview = window.preview.pixmap().toImage()
+            self.assertAlmostEqual(preview.pixelColor(102, 102).red(), red, delta=1)
+            frame = overlay.grab().toImage()
+            self.assertAlmostEqual(frame.pixelColor(50, 50).alpha(), red, delta=1)
+            self.assertEqual(frame.pixelColor(72, 50), QColor("white"))
+
+        slider = window.ink_slider
+        self.assertEqual(slider.value(), 70)
+        check_render(179)
+        slider.setSliderDown(True)
+        slider.setSliderPosition(100)
+        check_render(255)
+        self.assertEqual(window.ink_percentage.text(), "100%")
+        self.assertEqual(window.minimap_settings.ink_opacity, 70)
+        slider.setSliderDown(False)
+        self.assertEqual(MinimapSettings(self.path).ink_opacity, 100)
+        slider.setValue(0)
+        check_render(0)
+        window.minimap_settings.save_position(self.position)
+        self.assertEqual(MinimapSettings(self.path).ink_opacity, 0)
+        self.assertEqual(ink.pixelColor(50, 50), QColor("red"))
+        self.assertFalse(window.dirty)
 
     def assert_selected_preview(self):
         np.testing.assert_array_equal(self.window.last_preview, self.selected_image())
