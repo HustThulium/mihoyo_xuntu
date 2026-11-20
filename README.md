@@ -6,7 +6,7 @@
 
 ## 使用
 
-已有打包文件时，打开 `RouteOverlay.exe`。在源码目录中也可双击 `启动循图.cmd`。分发时请保留完整程序文件夹。
+将 Windows x64 ZIP 完整解压到可写目录，然后双击 `RouteOverlay.exe`。程序自带 Python 和使用到的第三方库，可以离线启动，无需安装 Python。请将 `_internal` 文件夹与 EXE 放在同一目录。
 
 1. 选择游戏窗口，关闭游戏大地图，点击主面板的“小地图位置设置…”框选小地图。
 2. 打开游戏大地图，调整到地形清楚的局部区域，点击“新建区域”。
@@ -38,7 +38,7 @@
 
 点击侧栏左下角的“设置…”。在“外观”中可选择浅色（默认）或深色，立即应用并自动保存。“通用 → 实时预览”中的“实时同步小地图”默认开启，更改后自动保存。关闭实时同步也可以继续叠加路线。
 
-请在可写目录中运行。设置保存在 `RouteOverlay.exe` 或 `run.py` 同目录的 `settings.json`。程序旁没有配置时，会复制 AppData 中已有的设置。清理旧配置前，请确认正在使用的程序目录中已生成 `settings.json`。分发程序时可省略个人配置。
+设置保存在 `RouteOverlay.exe` 或 `run.py` 同目录的 `settings.json`。程序旁没有配置时，会复制 AppData 中已有的设置。升级时，可将原来的 `settings.json` 复制到新目录，再用“打开区域”继续使用已有的 `.routepack`。
 
 “通用 → 窗口行为”中的“开始叠加后自动最小化”默认开启，启动叠加时最小化程序并切回游戏。关闭后，点击“开始叠加”会保留当前窗口，手动切回游戏即可显示叠加层。停止叠加后，主面板会恢复到原先的最大化状态或普通窗口大小。
 
@@ -54,7 +54,23 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe run.py
 ```
 
-运行测试：`.\.venv\Scripts\python.exe -m unittest discover -s tests -v`；打包：`.\build.ps1`。
+在源码目录中也可双击 `启动循图.cmd`。运行测试使用 `.\.venv\Scripts\python.exe -m unittest discover -s tests -v`。
+
+如果沿用以前的 `.venv`，请先用 `.\.venv\Scripts\python.exe -m pip uninstall opencv-python` 卸载旧版依赖，再安装 `requirements-lock.txt` 中的依赖，两种 OpenCV wheel 共用 `cv2` 模块。
+
+## 构建发布包
+
+按上面步骤准备好 `.venv` 后，在 Windows 桌面会话的 PowerShell 中运行：
+
+```powershell
+.\release.ps1
+```
+
+脚本会运行单元测试，构建便携程序，校验运行 ZIP 和 Qt 源码 ZIP，并在隔离桌面测试解压后的 EXE 启动、载入合成路线和退出。Qt 源码首次下载后会缓存，后续打包会复用通过 SHA-256 校验的缓存。
+
+通过验证后，`dist/release` 会得到版本化的运行 ZIP、对应的 `.sha256` 和 Qt 源码 ZIP。向公众分发时，将这三份文件放在同一下载页。只需本地试用时，可运行 `.\build.ps1` 快速构建 `dist/RouteOverlay` 下的程序。
+
+发新版前更新 `map_overlay/__init__.py` 中的版本号和 `packaging/RELEASE_NOTES.md`。升级 Qt 时，同步更新 `requirements-lock.txt` 与 `packaging/qt-sources.json` 中的版本、官方下载地址和校验值。
 
 ## 说明
 

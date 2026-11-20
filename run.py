@@ -39,10 +39,15 @@ def main():
 
     sys.excepthook = report_exception
     window = MainWindow()
+    # Delete both top-level widgets while Qt can still process deferred deletes.
+    app.aboutToQuit.connect(window.overlay.deleteLater)
+    app.aboutToQuit.connect(window.deleteLater)
     window.show()
     if len(sys.argv) > 1 and Path(sys.argv[1]).suffix.lower() == ".routepack":
         QTimer.singleShot(100, lambda: window.open_project(sys.argv[1]))
-    sys.exit(app.exec())
+    exit_code = app.exec()
+    app.shutdown()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
