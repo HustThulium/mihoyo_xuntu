@@ -10,6 +10,8 @@ import tempfile
 
 
 DEFAULT_INK_OPACITY = 70
+DEFAULT_THEME = "light"
+THEME_CHOICES = (("light", "浅色"), ("dark", "深色"))
 
 
 def portable_settings_path():
@@ -64,6 +66,7 @@ class MinimapSettings:
         self.preview_enabled = True
         self.minimize_on_tracking = True
         self.ink_opacity = DEFAULT_INK_OPACITY
+        self.theme = DEFAULT_THEME
         self.load_error = None
         try:
             contents = self._read(legacy_path)
@@ -88,6 +91,9 @@ class MinimapSettings:
                     opacity = 100 - transparency
             if type(opacity) is int and 0 <= opacity <= 100:
                 self.ink_opacity = opacity
+            theme = payload.get("theme")
+            if any(theme == key for key, _ in THEME_CHOICES):
+                self.theme = theme
         except FileNotFoundError:
             pass
         except (OSError, ValueError, TypeError) as exc:
@@ -110,35 +116,40 @@ class MinimapSettings:
     def save_position(self, position):
         if not isinstance(position, MinimapPosition):
             raise ValueError("小地图位置配置无效。")
-        self._save(position, self.preview_enabled, self.minimize_on_tracking)
+        self._save(position=position)
 
     def save_preview_enabled(self, enabled):
         if type(enabled) is not bool:
             raise ValueError("实时预览开关无效。")
-        self._save(self.position, enabled, self.minimize_on_tracking)
+        self._save(preview_enabled=enabled)
 
     def save_minimize_on_tracking(self, enabled):
         if type(enabled) is not bool:
             raise ValueError("开始叠加后自动最小化开关无效。")
-        self._save(self.position, self.preview_enabled, enabled)
+        self._save(minimize_on_tracking=enabled)
 
     def save_ink_opacity(self, value):
         if type(value) is not int or not 0 <= value <= 100:
             raise ValueError("墨迹不透明度应在 0% 到 100% 之间。")
-        self._save(self.position, self.preview_enabled, self.minimize_on_tracking, value)
+        self._save(ink_opacity=value)
 
-    def _save(self, position, preview_enabled, minimize_on_tracking, ink_opacity=None):
-        if ink_opacity is None:
-            ink_opacity = self.ink_opacity
+    def save_theme(self, theme):
+        if not any(theme == key for key, _ in THEME_CHOICES):
+            raise ValueError("外观模式无效。")
+        self._save(theme=theme)
+
+    def _save(self, **changes):
+        values = dict(position=self.position, preview_enabled=self.preview_enabled,
+                      minimize_on_tracking=self.minimize_on_tracking,
+                      ink_opacity=self.ink_opacity, theme=self.theme)
+        values.update(changes)
+        position = values["position"]
         payload = dict(version=1, minimap=position.to_payload() if position else None,
-                       preview_enabled=preview_enabled, minimize_on_tracking=minimize_on_tracking,
-                       ink_opacity=ink_opacity)
+                       **{key: value for key, value in values.items() if key != "position"})
         self._write(json.dumps(payload, ensure_ascii=False, indent=2))
         # Publish only after the persistent update succeeds.
-        self.position = position
-        self.preview_enabled = preview_enabled
-        self.minimize_on_tracking = minimize_on_tracking
-        self.ink_opacity = ink_opacity
+        for key, value in changes.items():
+            setattr(self, key, value)
         self.load_error = None
 
     def _write(self, contents, *, replace=True):

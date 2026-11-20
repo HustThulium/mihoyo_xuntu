@@ -11,7 +11,7 @@ import numpy as np
 import cv2
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QEvent, QTimer, Qt
-from PySide6.QtGui import QColor, QImage, QTransform
+from PySide6.QtGui import QColor, QImage, QPalette, QTransform
 from PySide6.QtTest import QTest
 
 from map_overlay import native
@@ -232,6 +232,55 @@ class AppSettingsTests(unittest.TestCase):
         self.window.receive_preview(self.preview_payload(generation=self.window.preview_generation - 1))
         self.assertEqual(self.window.preview_caption.text(), previous)
 
+    def test_preview_starts_collapsed_then_expands_on_first_position_only(self):
+        window = self.window
+        self.assertTrue(window.preview_tray.isHidden())
+        window.save_minimap_position(self.position, self.selected_image())
+        self.assertTrue(window.preview_button.isChecked())
+        self.assertFalse(window.preview_tray.isHidden())
+        preview_worker = window.preview_worker
+        window.preview_button.click()
+        self.assertTrue(window.preview_tray.isHidden())
+        self.assertIs(window.preview_worker, preview_worker)
+        window.save_minimap_position(self.position, self.selected_image())
+        self.assertTrue(window.preview_tray.isHidden())
+
+    def test_theme_updates_open_windows_and_persists_without_changing_minimap_settings(self):
+        self.window.save_minimap_position(self.position, self.selected_image())
+        self.window.save_ink_opacity(35)
+        settings = self.window.settings_dialog
+        picker = settings.theme_picker
+        self.assertEqual(picker.currentData(), "light")
+        role = QPalette.ColorRole.Window
+        light = self.app.palette().color(role)
+        picker.setCurrentIndex(picker.findData("dark"))
+        dark = self.app.palette().color(role)
+        self.assertNotEqual(dark, light)
+        self.assertEqual(settings.palette().color(role), dark)
+
+        with patch("map_overlay.settings.os.replace", side_effect=PermissionError("locked")), \
+                patch.object(self.window, "error") as error:
+            picker.setCurrentIndex(picker.findData("light"))
+        error.assert_called_once()
+        self.assertEqual(picker.currentData(), "dark")
+        self.assertEqual(self.app.palette().color(role), dark)
+
+        self.window.toggle_preview(False)
+        restarted = MinimapSettings(self.path)
+        self.assertEqual(restarted.theme, "dark")
+        self.assertEqual(restarted.position, self.position)
+        self.assertEqual(restarted.ink_opacity, 35)
+        self.assertFalse(restarted.preview_enabled)
+
+        window = MainWindow(settings_path=self.path)
+        try:
+            self.assertEqual(window.settings_dialog.theme_picker.currentData(), "dark")
+            self.assertEqual(window.palette().color(role), dark)
+        finally:
+            window.close()
+            window.deleteLater()
+            self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
     def test_preview_toggle_is_independent_of_tracking_and_survives_restart(self):
         self.window.save_minimap_position(self.position, self.selected_image())
         preview = self.window.preview_worker
@@ -324,7 +373,7 @@ class AppSettingsTests(unittest.TestCase):
             self.window.open_settings()
             select.assert_called_once()
         self.assertEqual(observed, ["小地图位置设置", False])
-        self.assertEqual(list(dialog.category_indexes), ["general"])
+        self.assertEqual(list(dialog.category_indexes), ["general", "appearance"])
 
     def test_window_preference_switch_persists_and_rolls_back_failed_save(self):
         toggle = self.window.settings_dialog.minimize_toggle

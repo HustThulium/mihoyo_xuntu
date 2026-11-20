@@ -5,7 +5,8 @@ project_root = Path(SPECPATH).parent
 a = Analysis(
     [str(project_root / 'run.py')],
     pathex=[str(project_root)],
-    binaries=[], datas=[], hiddenimports=[], hookspath=[], hooksconfig={},
+    binaries=[], datas=[(str(project_root / 'map_overlay' / 'icons'), 'map_overlay/icons')],
+    hiddenimports=[], hookspath=[], hooksconfig={},
     runtime_hooks=[],
     excludes=['PySide6.QtQml', 'PySide6.QtQuick', 'PySide6.QtNetwork', 'PySide6.QtOpenGLWidgets'],
     noarchive=False, optimize=0,
@@ -21,5 +22,6 @@ a.binaries = [entry for entry in a.binaries
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='RouteOverlay',
           debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
-          console=False, disable_windowed_traceback=False)
+          console=False, disable_windowed_traceback=False,
+          icon=str(project_root / 'map_overlay' / 'icons' / 'xuntu.ico'))
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='RouteOverlay')

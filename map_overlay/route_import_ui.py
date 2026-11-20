@@ -4,11 +4,12 @@ import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import (QBrush, QColor, QImage, QKeySequence, QPainter,
                            QPainterPath, QPen, QPolygonF, QShortcut, QTransform)
-from PySide6.QtWidgets import (QCheckBox, QRadioButton, QDialog, QGroupBox, QHBoxLayout, QLabel, QPushButton,
+from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel, QPushButton,
                               QSlider, QStackedWidget, QVBoxLayout, QWidget)
 
 from .annotations import ERASER_DIAMETER, MAX_ERASER_DIAMETER, erase_ink, paint_markers
 from .geometry import transform_points
+from .theme import segmented_buttons, workflow_layout
 from .widgets import ImageView, ink_checkerboard, ink_size_control, paint_eraser_cursor
 
 
@@ -17,18 +18,24 @@ class RouteAreaDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("选择路线图范围")
         self.resize(960, 720)
-        layout = QVBoxLayout(self)
-        self.hint = QLabel("使用整图，或拖动框选一段路线和周围地形。拼图中的各幅地图可分次导入。")
-        layout.addWidget(self.hint)
+        layout, _ = workflow_layout(self, "选择路线图范围", step="导入路线图 · 步骤 1 / 4")
+        instruction = QLabel("可使用整图，或框选路线和周围地形。拼图中的各幅地图可分次导入。")
+        instruction.setObjectName("muted")
+        instruction.setWordWrap(True)
+        layout.addWidget(instruction)
         self.view = ImageView(source, "rect")
-        layout.addWidget(self.view)
+        layout.addWidget(self.view, 1)
         row = QHBoxLayout()
         layout.addLayout(row)
-        for label, callback in [("取消", self.reject), ("匹配整图", self.use_all), ("匹配选区", self.accept)]:
+        self.hint = QLabel("拖动框选；滚轮缩放。")
+        self.hint.setWordWrap(True)
+        row.addWidget(self.hint, 1)
+        for label, callback in [("取消导入", self.reject), ("匹配整图", self.use_all), ("匹配选区", self.accept)]:
             button = QPushButton(label)
             button.clicked.connect(callback)
             row.addWidget(button)
         self.crop_button = button
+        self.crop_button.setObjectName("primary")
         self.crop_button.setEnabled(False)
         self.view.selected.connect(self.selection_changed)
         self.rect = None
@@ -38,8 +45,10 @@ class RouteAreaDialog(QDialog):
         self.crop_button.setEnabled(bool(rect and min(rect[2:]) >= 64))
         if rect and min(rect[2:]) < 64:
             self.hint.setText("请框选至少 64 × 64 像素，并包含周围地形。")
+        elif rect:
+            self.hint.setText(f"已选择 {rect[2]} × {rect[3]} 像素")
         else:
-            self.hint.setText("选区仅用于本次匹配和提取。")
+            self.hint.setText("拖动框选；滚轮缩放。")
 
     def use_all(self):
         self.rect = None
@@ -55,14 +64,17 @@ class RouteMatchDialog(QDialog):
         self.setWindowTitle("导入路线图 · 确认匹配位置")
         self.resize(1100, 700)
         self.reselect = False
-        layout = QVBoxLayout(self)
+        layout, _ = workflow_layout(self, "核对匹配位置", step="导入路线图 · 步骤 2 / 4")
         images = QHBoxLayout()
+        images.setSpacing(12)
         layout.addLayout(images, 1)
         views = []
-        for label, image in [("导入路线图 · 本次选区", selected), ("当前区块 · 完整底图", reference)]:
+        for label, image in [("路线图选区", selected), ("当前区域底图", reference)]:
             column = QVBoxLayout()
             images.addLayout(column, 1)
-            column.addWidget(QLabel(label))
+            heading = QLabel(label)
+            heading.setObjectName("panelHeading")
+            column.addWidget(heading)
             view = ImageView(image)
             column.addWidget(view, 1)
             views.append(view)
@@ -92,7 +104,7 @@ class RouteMatchDialog(QDialog):
         back = QPushButton("返回选区")
         back.clicked.connect(self.choose_area)
         buttons.addWidget(back)
-        self.next = QPushButton("确认位置，进入墨迹预览")
+        self.next = QPushButton("确认位置并继续")
         self.next.setObjectName("primary")
         self.next.setEnabled(match is not None)
         self.next.clicked.connect(self.accept)
@@ -231,25 +243,21 @@ class RoutePreviewDialog(QDialog):
         self.setWindowTitle("导入路线图 · 墨迹预览")
         self.resize(1000, 740)
         self.reselect = False
-        layout = QVBoxLayout(self)
+        layout, self.heading = workflow_layout(self, "调节墨迹提取")
         self.step = QLabel()
-        layout.addWidget(self.step)
+        self.step.setObjectName("dialogStep")
+        layout.insertWidget(0, self.step)
         self.view = InkPreview(extraction, project)
         layout.addWidget(self.view, 1)
         modes = QHBoxLayout()
         layout.addLayout(modes)
-        self.full_scope = QRadioButton("全图")
-        self.match_scope = QRadioButton("匹配区域")
-        self.composite_mode = QRadioButton("叠加底图")
-        self.ink_mode = QRadioButton("只看本次墨迹")
-        for title, first, second in [("显示范围", self.full_scope, self.match_scope),
-                                     ("显示内容", self.composite_mode, self.ink_mode)]:
-            group = QGroupBox(title)
-            options = QHBoxLayout(group)
-            options.addWidget(first)
-            options.addWidget(second)
-            first.setChecked(True)
-            modes.addWidget(group)
+        scope, (self.full_scope, self.match_scope) = segmented_buttons(("全图", "匹配区域"), "显示范围")
+        display, (self.composite_mode, self.ink_mode) = segmented_buttons(("叠加底图", "只看本次墨迹"), "显示内容")
+        modes.addWidget(QLabel("显示范围"))
+        modes.addWidget(scope)
+        modes.addSpacing(10)
+        modes.addWidget(QLabel("显示内容"))
+        modes.addWidget(display)
         self.full_scope.clicked.connect(self.view.fit_image)
         self.match_scope.clicked.connect(self.view.fit_import)
         self.ink_mode.toggled.connect(self.switch_view)
@@ -258,6 +266,7 @@ class RoutePreviewDialog(QDialog):
         layout.addWidget(self.pages)
         adjust = QWidget()
         row = QHBoxLayout(adjust)
+        row.setContentsMargins(0, 2, 0, 2)
         row.addWidget(QLabel("只留明显标注"))
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, 100)
@@ -273,6 +282,7 @@ class RoutePreviewDialog(QDialog):
         self.pages.addWidget(adjust)
         cleanup = QWidget()
         row = QHBoxLayout(cleanup)
+        row.setContentsMargins(0, 2, 0, 2)
         self.auto_clean = QPushButton("自动清理")
         self.auto_clean.clicked.connect(self.clean)
         row.addWidget(self.auto_clean)
@@ -294,6 +304,8 @@ class RoutePreviewDialog(QDialog):
         cancel.clicked.connect(self.reject)
         footer.addWidget(cancel)
         self.message = QLabel()
+        self.message.setWordWrap(True)
+        self.message.setObjectName("muted")
         footer.addWidget(self.message, 1)
         self.back = QPushButton()
         self.back.clicked.connect(self.previous)
@@ -324,7 +336,8 @@ class RoutePreviewDialog(QDialog):
 
     def set_step(self, page):
         self.pages.setCurrentIndex(page)
-        self.step.setText("第二步 · 清理与擦除" if page else "第一步 · 提取灵敏度")
+        self.step.setText(f"导入路线图 · 步骤 {page + 3} / 4")
+        self.heading.setText("清理路线墨迹" if page else "调节墨迹提取")
         self.back.setText("返回调节" if page else ("重新选区并重置草稿" if self.view.actions else "重新选区"))
         self.next.setText("保存墨迹" if page else "下一步 · 清理")
         self.message.setText("滚轮缩放，关闭橡皮擦可拖动地图。" if page else "检查细线和点位边缘是否完整。")

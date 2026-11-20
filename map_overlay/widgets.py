@@ -7,7 +7,7 @@ import cv2
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QRect
 from PySide6.QtGui import (QImage, QPixmap, QPainter, QPainterPath, QPen, QColor,
                            QBrush, QGuiApplication, QTransform, QFont)
-from PySide6.QtWidgets import (QWidget, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QWidget, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
                               QPushButton, QDialogButtonBox, QGraphicsView,
                               QGraphicsScene, QSpinBox)
 
@@ -15,6 +15,7 @@ from .annotations import (AnnotationEdits, Stroke, INK_WIDTH, ERASER_DIAMETER,
                           affine_transform, erase_ink, marker_rect, paint_annotations, paint_minimap)
 from .geometry import inverse, similarity
 from .project import DEFAULT_MARKER_SIZE, Marker
+from .theme import CANVAS_BACKGROUND, workflow_layout
 from . import native
 
 
@@ -61,7 +62,7 @@ class ImageView(QGraphicsView):
         super().__init__(parent)
         self.setScene(QGraphicsScene(self))
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.setBackgroundBrush(QColor("#0c131a"))
+        self.setBackgroundBrush(QColor(CANVAS_BACKGROUND))
         self.setMinimumSize(160, 140)
         self.image = None
         self.start = None
@@ -410,25 +411,33 @@ class AnnotationView(ImageView):
 class RegionDialog(QDialog):
     def __init__(self, image, mini=False, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("框选小地图" if mini else "保存局部地图")
+        title = "框选小地图" if mini else "框选区域底图"
+        self.setWindowTitle(title)
         self.resize(1120, 750)
-        layout = QVBoxLayout(self)
+        layout, _ = workflow_layout(self, title)
         text = ("拖出圆形小地图的外接正方形，圆心应位于框中央。避开旁边的按钮。" if mini else
                 "框选清晰的地图区域，避开菜单和缩放条，给路线周围留出余量。")
-        layout.addWidget(QLabel(text))
+        instruction = QLabel(text)
+        instruction.setWordWrap(True)
+        instruction.setObjectName("muted")
+        layout.addWidget(instruction)
         self.view = ImageView(image, "square" if mini else "rect")
         layout.addWidget(self.view, 1)
         self.hint = QLabel("拖动选择范围；滚轮缩放。")
-        layout.addWidget(self.hint)
+        self.hint.setWordWrap(True)
+        footer = QHBoxLayout()
+        footer.addWidget(self.hint, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("使用所选范围")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         self.ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.ok.setObjectName("primary")
         self.ok.setEnabled(False)
         self.view.selected.connect(self.selected)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        footer.addWidget(buttons)
+        layout.addLayout(footer)
         self.rect = None
         self.minimum = 96 if mini else 200
 
@@ -436,7 +445,10 @@ class RegionDialog(QDialog):
         self.rect = rect
         valid = bool(rect and min(rect[2:]) >= self.minimum)
         self.ok.setEnabled(valid)
-        self.hint.setText(f"范围：{rect} 像素" if valid else f"请框选至少 {self.minimum} × {self.minimum} 像素的区域。")
+        if valid:
+            self.hint.setText(f"已选择 {rect[2]} × {rect[3]} 像素")
+        else:
+            self.hint.setText(f"请框选至少 {self.minimum} × {self.minimum} 像素的区域。")
 
 
 class MinimapSettingsDialog(QDialog):
@@ -445,27 +457,37 @@ class MinimapSettingsDialog(QDialog):
     def __init__(self, status, position=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("小地图位置设置")
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(510)
         self.action = None
-        layout = QVBoxLayout(self)
+        layout, _ = workflow_layout(self, "小地图位置")
+        panel = QFrame()
+        panel.setObjectName("workflowPanel")
+        details = QVBoxLayout(panel)
         summary = QLabel(status)
+        summary.setObjectName("panelHeading")
         summary.setWordWrap(True)
-        layout.addWidget(summary)
+        details.addWidget(summary)
         if position:
             x, y, w, h = position.rect
-            layout.addWidget(QLabel(f"游戏画面内的位置：({x}, {y})，范围 {w} × {h} 像素"))
+            details.addWidget(QLabel(f"游戏画面内的位置 ({x}, {y}) · 范围 {w} × {h} 像素"))
+        layout.addWidget(panel)
         explanation = QLabel("此设置保存在本机，所有区域共用，无需先建立区域。\n"
                              "游戏窗口移动后可继续使用；分辨率、窗口大小或游戏 UI 布局改变后，请重新框选。\n"
                              "框选前请关闭游戏大地图，确保小地图完整可见。")
+        explanation.setObjectName("muted")
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
         self.select_button = QPushButton("重新框选小地图位置" if position else "从游戏画面框选小地图位置")
+        self.select_button.setObjectName("primary")
+        self.select_button.setDefault(True)
         self.select_button.clicked.connect(lambda: self.choose("select"))
-        layout.addWidget(self.select_button)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.button(QDialogButtonBox.StandardButton.Close).setText("关闭")
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        close = QPushButton("关闭")
+        close.clicked.connect(self.reject)
+        actions.addWidget(close)
+        actions.addWidget(self.select_button)
+        layout.addLayout(actions)
 
     def choose(self, action):
         self.action = action
@@ -476,10 +498,10 @@ class CalibrationDialog(QDialog):
     def __init__(self, reference, query, parent=None):
         super().__init__(parent)
         self.setWindowTitle("辅助校准 · 选择同一组地标")
-        self.resize(1220, 760)
+        self.resize(1120, 730)
         self.source, self.destination = [], []
         self.matrix = None
-        layout = QVBoxLayout(self)
+        layout, _ = workflow_layout(self, "配对地图地标")
         self.hint = QLabel("先点左侧底图中的地标 1，再点右侧截图中的同一地标。至少三组，尽量分散。")
         self.hint.setWordWrap(True)
         layout.addWidget(self.hint)
@@ -488,7 +510,9 @@ class CalibrationDialog(QDialog):
         self.query = ImageView(query, "pick")
         for title, view in [("保存的底图", self.reference), ("当前截图", self.query)]:
             column = QVBoxLayout()
-            column.addWidget(QLabel(title))
+            heading = QLabel(title)
+            heading.setObjectName("panelHeading")
+            column.addWidget(heading)
             column.addWidget(view, 1)
             row.addLayout(column, 1)
         layout.addLayout(row, 1)
@@ -500,6 +524,7 @@ class CalibrationDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
         self.ok.setText("使用校准结果")
+        self.ok.setObjectName("primary")
         self.ok.setEnabled(False)
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         buttons.accepted.connect(self.accept)

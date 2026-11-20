@@ -3,13 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 import time
 
-from PySide6.QtCore import Qt, QTimer, QStandardPaths, QRectF, QSignalBlocker
-from PySide6.QtGui import QPainter, QPixmap, QKeySequence, QShortcut, QColor
+from PySide6.QtCore import Qt, QTimer, QStandardPaths, QRectF, QSize, QSignalBlocker
+from PySide6.QtGui import QPainter, QPixmap, QIcon, QKeySequence, QShortcut, QColor
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
                               QVBoxLayout, QPushButton, QLabel, QFileDialog,
-                              QMessageBox, QComboBox, QSplitter, QFrame,
-                              QInputDialog, QColorDialog, QSlider, QButtonGroup,
-                              QGroupBox, QRadioButton)
+                              QMessageBox, QComboBox, QFrame, QStackedWidget,
+                              QInputDialog, QColorDialog, QSlider,
+                              QScrollArea)
 
 from . import native
 from .annotations import MAX_ERASER_DIAMETER, affine_transform, paint_minimap
@@ -20,40 +20,21 @@ from .route_import import RouteExtraction
 from .route_import_ui import RouteAreaDialog, RouteMatchDialog, RoutePreviewDialog
 from .settings import MinimapPosition, MinimapSettings, portable_settings_path
 from .settings_ui import SettingsDialog
+from .theme import apply_theme, segmented_buttons
 from .vision import Localizer
 from .widgets import (AnnotationView, RegionDialog, CalibrationDialog,
                       RouteOverlay, MinimapSettingsDialog, ink_size_control, qimage)
 
 
-STYLE = """
-QWidget { background:#111a23; color:#dce8ef; font-family:'Microsoft YaHei UI'; font-size:13px; }
-QMainWindow { background:#0c131a; }
-QLabel#title { font-size:25px; font-weight:700; color:#f1faf8; }
-QLabel#muted { color:#91a6b6; }
-QLabel#section { color:#65e7bd; font-size:12px; font-weight:700; margin-top:12px; }
-QPushButton { background:#1a2a37; border:1px solid #2b4050; border-radius:7px; padding:9px 12px; text-align:left; }
-QPushButton:hover { background:#223b49; border-color:#4b9e8d; }
-QPushButton:disabled { color:#526574; border-color:#22313d; }
-QPushButton#primary { background:#22745f; border-color:#32987d; color:white; font-weight:600; }
-QPushButton#primary:enabled:hover { background:#2d8c73; }
-QPushButton#primary:disabled { background:#252a2e; border-color:#383e43; color:#92999e; }
-QPushButton#screenshotMode:checked { background:#28483f; border-color:#32987d; color:#e7f4f2; }
-QPushButton#annotationTool:enabled:checked { background:#28483f; border-color:#32987d; color:#e7f4f2; }
-QPushButton#settingsButton { padding:0; text-align:center; font-family:'Segoe UI Symbol'; font-size:21px; }
-QComboBox { background:#1a2a37; border:1px solid #2b4050; border-radius:6px; padding:7px; }
-QComboBox QAbstractItemView { background:#1a2a37; selection-background-color:#22745f; }
-QCheckBox { spacing:8px; padding:4px; }
-QGraphicsView { border:1px solid #2b4050; border-radius:7px; }
-QSplitter::handle { background:#243644; }
-QStatusBar { color:#a8bdc9; background:#0c131a; }
-QToolTip { background:#253b49; color:white; border:1px solid #4b9e8d; }
-"""
+APP_TITLE = "循图 · 原神路线叠加工具"
+APP_ICON_PATH = Path(__file__).with_name("icons") / "xuntu.ico"
 
 
 class MainWindow(QMainWindow):
     def __init__(self, settings_path=None):
         super().__init__()
-        self.setWindowTitle("循图 · 原神路线叠加原型 0.1")
+        self.setWindowTitle(APP_TITLE)
+        QApplication.instance().setWindowIcon(QIcon(str(APP_ICON_PATH)))
         self.resize(1240, 830)
         self.project = None
         self.project_path = None
@@ -80,13 +61,13 @@ class MainWindow(QMainWindow):
             if app_data:
                 legacy_path = Path(app_data) / "settings.json"
         self.minimap_settings = MinimapSettings(settings_path, legacy_path=legacy_path)
+        apply_theme(QApplication.instance(), self.minimap_settings.theme)
         self.overlay = RouteOverlay(self.minimap_settings.ink_opacity / 100)
         self.build_ui()
         self.refresh_windows()
         self.registered = native.register_hotkeys(int(self.winId()))
-        self.statusBar().showMessage("仅本地截图与画面叠加 · 不读取游戏内存 · 不注入 · 不自动操作游戏")
         if len(self.registered) != len(native.HOTKEYS):
-            self.statusBar().showMessage("部分全局快捷键注册失败，请使用主界面按钮。")
+            self.statusBar().showMessage("部分全局快捷键注册失败，请使用主界面按钮。", 6500)
         if native.SCREENSHOT_HOTKEY not in self.registered:
             self.screenshot_button.setToolTip("Ctrl+Alt+F11 注册失败，可用此按钮切换截图模式。")
         self.watchdog = QTimer(self)
@@ -98,64 +79,122 @@ class MainWindow(QMainWindow):
     def build_ui(self):
         root = QWidget()
         self.setCentralWidget(root)
-        outer = QHBoxLayout(root)
-        outer.setContentsMargins(20, 20, 20, 16)
-        outer.setSpacing(18)
-        sidebar = QWidget()
-        sidebar.setFixedWidth(288)
-        side = QVBoxLayout(sidebar)
-        side.setContentsMargins(0, 0, 0, 0)
-        side.setSpacing(4)
-        title = QLabel("循图  /  ROUTE")
-        title.setObjectName("title")
-        side.addWidget(title)
-        subtitle = QLabel("局部地图 · 手绘路线 · 视觉定位\nWindows 画面叠加验证原型")
-        subtitle.setObjectName("muted")
-        side.addWidget(subtitle)
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        bar = QFrame()
+        bar.setObjectName("brandBar")
+        brand = QHBoxLayout(bar)
+        brand.setContentsMargins(18, 8, 18, 8)
+        mark = QLabel()
+        mark.setObjectName("brandMark")
+        mark.setPixmap(self.windowIcon().pixmap(QSize(24, 24), self.devicePixelRatioF()))
+        brand.addWidget(mark)
+        name = QLabel("循图")
+        name.setObjectName("brandName")
+        brand.addWidget(name)
+        brand.addSpacing(6)
+        description = QLabel("原神路线叠加工具")
+        description.setObjectName("brandDescription")
+        brand.addWidget(description)
+        brand.addStretch()
+        outer.addWidget(bar)
+        workspace = QHBoxLayout()
+        workspace.setSpacing(0)
+        workspace.addWidget(self.build_sidebar())
+        workspace.addWidget(self.build_editor(), 1)
+        outer.addLayout(workspace, 1)
 
-        def section(text):
+        notifications = self.statusBar()
+        notifications.setSizeGripEnabled(False)
+        notifications.hide()
+        notifications.messageChanged.connect(lambda message: notifications.setVisible(bool(message)))
+        self.settings_dialog = SettingsDialog(
+            self.minimap_settings.preview_enabled, parent=self,
+            minimize_on_tracking=self.minimap_settings.minimize_on_tracking,
+            theme=self.minimap_settings.theme)
+        self.preview_toggle = self.settings_dialog.preview_toggle
+        self.preview_toggle.toggled.connect(self.toggle_preview)
+        self.settings_dialog.minimize_toggle.toggled.connect(self.toggle_minimize_on_tracking)
+        self.settings_dialog.theme_picker.currentIndexChanged.connect(self.change_theme)
+
+    def build_sidebar(self):
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(250)
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(12, 10, 12, 9)
+        side.setSpacing(8)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        panel = QWidget()
+        controls = QVBoxLayout(panel)
+        controls.setContentsMargins(4, 6, 4, 6)
+        controls.setSpacing(7)
+
+        def section(text, divider=True):
+            if divider:
+                line = QFrame()
+                line.setObjectName("sidebarDivider")
+                line.setFixedHeight(1)
+                controls.addSpacing(5)
+                controls.addWidget(line)
+                controls.addSpacing(3)
             label = QLabel(text)
             label.setObjectName("section")
-            side.addWidget(label)
+            controls.addWidget(label)
 
-        def button(text, callback, primary=False):
-            control = QPushButton(text)
-            if primary:
-                control.setObjectName("primary")
-            control.clicked.connect(callback)
-            side.addWidget(control)
-            return control
-
-        section("01  选择游戏窗口")
+        section("游戏窗口", divider=False)
         row = QHBoxLayout()
         self.targets = QComboBox()
         self.targets.setMinimumWidth(0)
         self.targets.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.targets.setMinimumContentsLength(12)
+        self.targets.setMinimumContentsLength(8)
         self.targets.currentIndexChanged.connect(self.target_changed)
         row.addWidget(self.targets, 1)
         refresh = QPushButton("刷新")
         refresh.clicked.connect(self.refresh_windows)
         row.addWidget(refresh)
-        side.addLayout(row)
-        section("小地图位置")
-        self.minimap_position_button = button("小地图位置设置…", self.open_minimap_settings)
+        controls.addLayout(row)
+        self.minimap_position_button = QPushButton("小地图位置设置…")
+        self.minimap_position_button.clicked.connect(self.open_minimap_settings)
+        controls.addWidget(self.minimap_position_button)
         self.minimap_status = QLabel()
         self.minimap_status.setObjectName("muted")
         self.minimap_status.setWordWrap(True)
-        side.addWidget(self.minimap_status)
-        section("02  准备区域与路线")
-        button("从游戏大地图建立区域", self.new_capture, True)
-        button("打开区域", self.open_project)
-        self.import_route_button = button("导入路线图…", self.import_route)
+        controls.addWidget(self.minimap_status)
+        section("区域与路线")
         row = QHBoxLayout()
-        for text, callback in [("保存区域", self.save_project), ("撤销", lambda: self.canvas.undo())]:
-            item = QPushButton(text)
-            item.clicked.connect(callback)
-            row.addWidget(item, 1)
-        side.addLayout(row)
+        new = QPushButton("新建区域")
+        new.setToolTip("从游戏大地图建立区域")
+        new.clicked.connect(self.new_capture)
+        row.addWidget(new, 1)
+        open_region = QPushButton("打开区域")
+        open_region.clicked.connect(self.open_project)
+        row.addWidget(open_region, 1)
+        controls.addLayout(row)
+        self.import_route_button = QPushButton("导入路线图…")
+        self.import_route_button.clicked.connect(self.import_route)
+        controls.addWidget(self.import_route_button)
+        self.save_button = QPushButton("保存区域")
+        self.save_button.setObjectName("primary")
+        self.save_button.setToolTip("保存区域（Ctrl+S）")
+        self.save_button.clicked.connect(self.save_project)
+        controls.addWidget(self.save_button)
+
+        section("游戏内叠加")
+        self.track_button = self.shortcut_button("开始叠加", "Ctrl+Alt+F9", "primary", self.toggle_tracking)
+        self.track_button.setMinimumHeight(37)
+        controls.addWidget(self.track_button)
+        self.screenshot_button = self.shortcut_button("截图模式", "Ctrl+Alt+F11", "screenshotMode",
+                                                     self.toggle_screenshot_mode)
+        self.screenshot_button.setCheckable(True)
+        self.screenshot_button.setEnabled(False)
+        self.screenshot_button.setToolTip("暂停定位并允许截图。再次点击或按快捷键恢复定位。")
+        controls.addWidget(self.screenshot_button)
         opacity_row = QHBoxLayout()
-        opacity_row.addWidget(QLabel("小地图墨迹不透明度"))
+        opacity_row.addWidget(QLabel("墨迹不透明度"), 1)
         self.ink_slider = QSlider(Qt.Orientation.Horizontal)
         self.ink_slider.setAccessibleName("小地图墨迹不透明度")
         self.ink_slider.setToolTip("向右拖动让墨迹更清晰，100% 为完全不透明")
@@ -163,104 +202,156 @@ class MainWindow(QMainWindow):
         self.ink_slider.setValue(self.minimap_settings.ink_opacity)
         self.ink_slider.setTracking(False)
         self.ink_percentage = QLabel(f"{self.ink_slider.value()}%")
-        self.ink_percentage.setMinimumWidth(self.ink_percentage.fontMetrics().horizontalAdvance("100%"))
         self.ink_percentage.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.ink_slider.sliderMoved.connect(self.show_ink_opacity)
         self.ink_slider.valueChanged.connect(self.save_ink_opacity)
-        opacity_row.addWidget(self.ink_slider, 1)
         opacity_row.addWidget(self.ink_percentage)
-        side.addLayout(opacity_row)
-        section("03  小地图定位与叠加")
-        button("辅助校准：选择对应地标", self.calibrate_minimap)
-        self.track_button = button("开始叠加  Ctrl+Alt+F9", self.toggle_tracking, True)
-        self.screenshot_button = button("截图模式  Ctrl+Alt+F11", self.toggle_screenshot_mode)
-        self.screenshot_button.setObjectName("screenshotMode")
-        self.screenshot_button.setCheckable(True)
-        self.screenshot_button.setEnabled(False)
-        self.screenshot_button.setToolTip("暂停定位并允许截图。再次点击或按快捷键恢复定位。")
-        section("离线验证")
-        button("测试一张小地图截图", self.test_image)
-        button("加载离线演示（合成地图）", self.load_demo)
-        note = QLabel("首版范围：地表地图、固定朝北。\n地图内缩放变化与地下分层暂不保证。\n定位不可靠时自动隐藏路线。")
-        note.setObjectName("muted")
-        note.setWordWrap(True)
-        side.addWidget(note)
-        side.addStretch()
-        self.settings_button = QPushButton("⚙")
+        controls.addLayout(opacity_row)
+        controls.addWidget(self.ink_slider)
+        controls.addStretch(1)
+        scroll.setWidget(panel)
+        side.addWidget(scroll, 1)
+        line = QFrame()
+        line.setObjectName("sidebarDivider")
+        line.setFixedHeight(1)
+        side.addWidget(line)
+        self.settings_button = QPushButton("设置…")
         self.settings_button.setObjectName("settingsButton")
-        self.settings_button.setFixedSize(34, 34)
-        self.settings_button.setToolTip("设置")
         self.settings_button.setAccessibleName("设置")
         self.settings_button.clicked.connect(self.open_settings)
         side.addWidget(self.settings_button, alignment=Qt.AlignmentFlag.AlignLeft)
-        outer.addWidget(sidebar)
+        return sidebar
 
-        content = QVBoxLayout()
-        self.area_label = QLabel("还没有区域 · 从游戏大地图建立或打开已有区域")
-        self.area_label.setStyleSheet("font-size:16px; font-weight:600;")
-        content.addWidget(self.area_label)
+    @staticmethod
+    def shortcut_button(text, shortcut, name, callback):
+        button = QPushButton(text)
+        button.setObjectName(name)
+        button.setProperty("hasShortcut", True)
+        button.setAccessibleDescription(shortcut)
+        button.clicked.connect(callback)
+        layout = QHBoxLayout(button)
+        layout.setContentsMargins(11, 0, 11, 0)
+        layout.addStretch()
+        hint = QLabel(shortcut)
+        hint.setObjectName("primaryShortcut" if name == "primary" else "shortcutHint")
+        hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout.addWidget(hint)
+        return button
+
+    def build_editor(self):
+        editor = QFrame()
+        editor.setObjectName("editor")
+        content = QVBoxLayout(editor)
+        content.setContentsMargins(14, 10, 14, 8)
+        content.setSpacing(8)
+        region = QHBoxLayout()
+        self.area_label = QLabel("路线编辑")
+        self.area_label.setObjectName("regionTitle")
+        self.area_label.setMinimumWidth(1)
+        region.addWidget(self.area_label)
+        self.area_status = QLabel()
+        self.area_status.setObjectName("muted")
+        self.area_status.hide()
+        region.addWidget(self.area_status)
+        region.addStretch(1)
         self.canvas = AnnotationView()
+        self.undo_button = QPushButton("撤销")
+        self.undo_button.setToolTip("撤销（Ctrl+Z）")
+        self.undo_button.clicked.connect(self.canvas.undo)
+        region.addWidget(self.undo_button)
+        content.addLayout(region)
         self.build_annotation_tools(content)
-        splitter = QSplitter(Qt.Orientation.Vertical)
         self.canvas.changed.connect(self.annotations_changed)
+        self.map_stack = QStackedWidget()
+        empty = QFrame()
+        empty.setObjectName("emptyMap")
+        placeholder = QVBoxLayout(empty)
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_title = QLabel("还没有区域", alignment=Qt.AlignmentFlag.AlignCenter)
+        empty_title.setObjectName("emptyMapTitle")
+        placeholder.addWidget(empty_title)
+        empty_hint = QLabel("从游戏大地图新建区域，或打开已有区域文件。", alignment=Qt.AlignmentFlag.AlignCenter)
+        empty_hint.setObjectName("muted")
+        empty_hint.setWordWrap(True)
+        placeholder.addWidget(empty_hint)
+        self.map_stack.addWidget(empty)
+        self.map_stack.addWidget(self.canvas)
+        content.addWidget(self.map_stack, 1)
+        footer = QHBoxLayout()
+        self.state = QLabel("等待准备地图")
+        self.state.setObjectName("overlayState")
+        self.state.setWordWrap(True)
+        footer.addWidget(self.state, 1)
+        self.preview_button = QPushButton("小地图预览  +")
+        self.preview_button.setObjectName("previewToggle")
+        self.preview_button.setAccessibleName("小地图预览")
+        self.preview_button.setCheckable(True)
+        self.preview_button.toggled.connect(self.set_preview_expanded)
+        footer.addWidget(self.preview_button)
+        content.addLayout(footer)
+        content.addWidget(self.build_preview())
         self.refresh_annotation_controls()
-        splitter.addWidget(self.canvas)
-        diagnostics = QWidget()
-        row = QHBoxLayout(diagnostics)
-        row.setContentsMargins(0, 8, 0, 0)
+        return editor
+
+    def build_preview(self):
+        self.preview_tray = QFrame()
+        self.preview_tray.setObjectName("previewTray")
+        self.preview_tray.hide()
+        row = QHBoxLayout(self.preview_tray)
+        row.setContentsMargins(10, 10, 10, 10)
+        row.setSpacing(14)
         self.preview = QLabel("小地图识别预览")
+        self.preview.setObjectName("minimapPreview")
         self.preview.setFixedSize(210, 210)
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview.setStyleSheet("background:#0c131a; border:1px solid #2b4050; border-radius:8px;")
-        preview_column = QVBoxLayout()
-        preview_column.addWidget(self.preview)
-        self.preview_caption = QLabel("小地图预览")
-        self.preview_caption.setObjectName("muted")
-        self.preview_caption.setFixedWidth(210)
-        self.preview_caption.setWordWrap(True)
-        self.preview_caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        preview_column.addWidget(self.preview_caption)
-        row.addLayout(preview_column)
+        row.addWidget(self.preview, alignment=Qt.AlignmentFlag.AlignTop)
         info = QVBoxLayout()
-        self.state = QLabel("等待准备地图")
-        self.state.setStyleSheet("font-size:19px; font-weight:600; color:#65e7bd;")
-        self.state.setWordWrap(True)
-        info.addWidget(self.state)
+        heading = QLabel("小地图预览")
+        heading.setObjectName("panelHeading")
+        info.addWidget(heading)
+        self.preview_caption = QLabel("等待画面")
+        self.preview_caption.setObjectName("muted")
+        self.preview_caption.setWordWrap(True)
+        info.addWidget(self.preview_caption)
+        details_button = QPushButton("定位详情  +")
+        details_button.setCheckable(True)
+        info.addWidget(details_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        diagnostics = QWidget()
+        details = QVBoxLayout(diagnostics)
+        details.setContentsMargins(0, 0, 0, 0)
         self.metrics = QLabel("匹配点 —    图像拟合误差 —    处理时间 —")
         self.metrics.setWordWrap(True)
         self.metrics.setObjectName("muted")
-        info.addWidget(self.metrics)
-        self.detail = QLabel("用画笔、直线或橡皮擦编辑墨迹，Ctrl+Z 撤销。\n切换到浏览可拖动地图，滚轮缩放。")
+        details.addWidget(self.metrics)
+        info.addWidget(diagnostics)
+        diagnostics.hide()
+        details_button.toggled.connect(diagnostics.setVisible)
+        details_button.toggled.connect(lambda expanded: details_button.setText("定位详情  −" if expanded else "定位详情  +"))
+        self.detail = QLabel()
         self.detail.setObjectName("muted")
         self.detail.setWordWrap(True)
         info.addWidget(self.detail)
         info.addStretch()
         row.addLayout(info, 1)
-        splitter.addWidget(diagnostics)
-        splitter.setSizes([490, 220])
-        content.addWidget(splitter, 1)
-        outer.addLayout(content, 1)
-        self.settings_dialog = SettingsDialog(
-            self.minimap_settings.preview_enabled, parent=self,
-            minimize_on_tracking=self.minimap_settings.minimize_on_tracking)
-        self.preview_toggle = self.settings_dialog.preview_toggle
-        self.preview_toggle.toggled.connect(self.toggle_preview)
-        self.settings_dialog.minimize_toggle.toggled.connect(self.toggle_minimize_on_tracking)
+        return self.preview_tray
+
+    def set_preview_expanded(self, expanded):
+        self.preview_tray.setVisible(expanded)
+        self.preview_button.setText("收起小地图预览  −" if expanded else "小地图预览  +")
+        self.preview_button.setAccessibleName("收起小地图预览" if expanded else "小地图预览")
 
     def build_annotation_tools(self, content):
         self.annotation_toolbar = QWidget()
         tools = QHBoxLayout(self.annotation_toolbar)
         tools.setContentsMargins(0, 0, 0, 0)
-        tool_group = QButtonGroup(self.annotation_toolbar)
-        for label, mode in [("画笔", "draw"), ("直线", "line"), ("橡皮擦", "erase"), ("浏览", "view")]:
-            button = QPushButton(label)
-            button.setObjectName("annotationTool")
-            button.setCheckable(True)
-            button.setChecked(mode == self.canvas.mode)
+        modes = ("draw", "line", "erase", "view")
+        mode_frame, mode_buttons = segmented_buttons(("画笔", "直线", "橡皮擦", "浏览"), "编辑工具",
+                                                      current=modes.index(self.canvas.mode))
+        tools.addWidget(mode_frame)
+        for button, mode in zip(mode_buttons, modes):
             button.toggled.connect(lambda checked, mode=mode: checked and self.change_canvas_mode(mode))
-            tool_group.addButton(button)
-            tools.addWidget(button)
-        self.brush_button = QPushButton("画笔颜色…")
+        self.brush_button = QPushButton("颜色…")
+        self.brush_button.setAccessibleName("画笔颜色")
         self.brush_button.clicked.connect(self.choose_color)
         tools.addWidget(self.brush_button)
         self.line_width = ink_size_control("线宽", 24, self.canvas.ink_width)
@@ -271,14 +362,8 @@ class MainWindow(QMainWindow):
         tools.addWidget(self.eraser_size)
         tools.addStretch(1)
 
-        display = QGroupBox("显示内容")
-        options = QHBoxLayout(display)
-        composite = QRadioButton("叠加底图")
-        composite.setChecked(True)
-        ink_only = QRadioButton("只看墨迹")
+        display, (_, ink_only) = segmented_buttons(("叠加底图", "只看墨迹"), "显示内容")
         ink_only.toggled.connect(self.canvas.set_ink_only)
-        options.addWidget(composite)
-        options.addWidget(ink_only)
         tools.addWidget(display)
         fit = QPushButton("适应窗口")
         fit.clicked.connect(self.canvas.fit_image)
@@ -287,6 +372,13 @@ class MainWindow(QMainWindow):
 
     def error(self, exception):
         QMessageBox.warning(self, "无法完成操作", str(exception))
+
+    def choose_file(self, title, file_filter, *, filename=None):
+        if filename is None:
+            selected, _ = QFileDialog.getOpenFileName(self, title, "", file_filter)
+        else:
+            selected, _ = QFileDialog.getSaveFileName(self, title, filename, file_filter)
+        return selected
 
     def hwnd(self):
         handle = self.targets.currentData()
@@ -327,7 +419,12 @@ class MainWindow(QMainWindow):
         return box[2:] if box else None
 
     def update_minimap_status(self):
-        status = self.minimap_settings.status(self.current_client_size())
+        client_size = self.current_client_size()
+        settings = self.minimap_settings
+        status = settings.status(client_size)
+        self.minimap_status.setToolTip(status)
+        if settings.position and not settings.load_error and (client_size is None or settings.position.matches(client_size)):
+            status = "小地图位置已设置"
         self.minimap_status.setText(status)
 
     def show_ink_opacity(self, value):
@@ -381,6 +478,21 @@ class MainWindow(QMainWindow):
             toggle.setChecked(self.minimap_settings.minimize_on_tracking)
             toggle.blockSignals(False)
             self.error(exc)
+
+    def change_theme(self, index):
+        picker = self.settings_dialog.theme_picker
+        theme = picker.itemData(index)
+        previous = self.minimap_settings.theme
+        if theme == previous:
+            return
+        try:
+            self.minimap_settings.save_theme(theme)
+        except (OSError, ValueError) as exc:
+            with QSignalBlocker(picker):
+                picker.setCurrentIndex(picker.findData(previous))
+            self.error(exc)
+            return
+        apply_theme(QApplication.instance(), theme)
 
     def restore_window(self):
         # showNormal() also clears WindowMaximized. Remove only minimization so
@@ -458,10 +570,12 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
         self.dirty = path is None
+        self.map_stack.setCurrentWidget(self.canvas)
         self.refresh_annotation_controls()
         self.update_label()
         self.state.setText("底图已准备 · 可以绘制或导入路线")
         self.metrics.setText(f"底图 {project.image.shape[1]} × {project.image.shape[0]} · 特征点 {len(self.localizer.points)}")
+        self.detail.clear()
         if self.live_preview_image is not None:
             self.update_preview(self.live_preview_image, None)
         elif self.minimap_preview is not None:
@@ -476,10 +590,14 @@ class MainWindow(QMainWindow):
 
     def update_label(self):
         if self.project:
-            label = f"{self.project.name}{' *' if self.dirty else ''}"
+            self.area_label.setText(self.project.name)
+            self.area_label.setToolTip(self.project.name)
+            status = "未保存" if self.dirty else "已保存"
             if self.project.markers:
-                label += f"  ·  {len(self.project.markers)} 个标记"
-            self.area_label.setText(label)
+                status += f" · {len(self.project.markers)} 个标记"
+            self.area_status.setText(status)
+            self.area_status.show()
+            self.undo_button.setEnabled(bool(self.canvas.edits and self.canvas.edits.history))
 
     def annotations_changed(self):
         if self.project:
@@ -500,11 +618,15 @@ class MainWindow(QMainWindow):
         self.line_width.setVisible(drawing)
         self.eraser_size.setVisible(self.canvas.mode == "erase")
         self.import_route_button.setEnabled(active)
+        self.save_button.setEnabled(active)
+        self.undo_button.setEnabled(bool(self.canvas.edits and self.canvas.edits.history))
         self.refresh_brush_color()
 
     def refresh_brush_color(self):
         if self.project is not None:
-            self.brush_button.setStyleSheet(f"border-left: 4px solid {self.project.color};")
+            swatch = QPixmap(13, 13)
+            swatch.fill(QColor(self.project.color))
+            self.brush_button.setIcon(QIcon(swatch))
 
     def import_route(self):
         if self.busy or self.project is None:
@@ -512,7 +634,7 @@ class MainWindow(QMainWindow):
         self.busy = True
         area = None
         try:
-            path, _ = QFileDialog.getOpenFileName(self, "导入路线图", "", "路线图 (*.png *.jpg *.jpeg *.bmp)")
+            path = self.choose_file("导入路线图", "路线图 (*.png *.jpg *.jpeg *.bmp)")
             if not path:
                 return
             source = read_image(path)
@@ -547,7 +669,7 @@ class MainWindow(QMainWindow):
                     self.canvas.edits.merge_ink(extraction.origin, preview.view.ink)
                     self.canvas.viewport().update()
                     self.canvas.changed.emit()
-                    self.statusBar().showMessage("已合入墨迹，可撤销本次导入。点击「保存区域」写入文件。")
+                    self.statusBar().showMessage("已合入墨迹，可撤销本次导入。点击「保存区域」写入文件。", 4500)
                 if not preview.reselect:
                     break
                 preview.deleteLater()
@@ -611,7 +733,7 @@ class MainWindow(QMainWindow):
             selector = RegionDialog(image)
             if selector.exec() != QDialogAccepted:
                 return
-            name, ok = QInputDialog.getText(None, "区域名称", "给这个跑图区域起一个名字：", text="我的收集路线")
+            name, ok = QInputDialog.getText(None, "区域名称", "输入区域名称", text="我的收集路线")
             if not ok:
                 return
             x, y, w, h = selector.rect
@@ -626,7 +748,7 @@ class MainWindow(QMainWindow):
         if not self.confirm_discard():
             return
         if not path or isinstance(path, bool):
-            path, _ = QFileDialog.getOpenFileName(self, "打开区域", "", "循图区域 (*.routepack)")
+            path = self.choose_file("打开区域", "循图区域 (*.routepack)")
         if path:
             try:
                 project = Project.load(path)
@@ -642,7 +764,8 @@ class MainWindow(QMainWindow):
             self.require_project()
             path = self.project_path
             if not path:
-                path, _ = QFileDialog.getSaveFileName(self, "保存区域与路线", self.project.name + ".routepack", "循图区域 (*.routepack)")
+                path = self.choose_file("保存区域与路线", "循图区域 (*.routepack)",
+                                        filename=self.project.name + ".routepack")
             if not path:
                 return False
             if not str(path).lower().endswith(".routepack"):
@@ -651,7 +774,7 @@ class MainWindow(QMainWindow):
             self.project_path = path
             self.dirty = False
             self.update_label()
-            self.statusBar().showMessage(f"已保存：{path}")
+            self.statusBar().showMessage(f"已保存：{path}", 4000)
             return True
         except Exception as exc:
             self.error(exc)
@@ -671,18 +794,21 @@ class MainWindow(QMainWindow):
         self.busy = True
         if not self.stop_preview():
             self.busy = False
+            dialog.deleteLater()
             return
         try:
             accepted = dialog.exec() == QDialogAccepted
         finally:
             self.busy = False
             self.sync_preview()
+            dialog.deleteLater()
         if accepted and dialog.action == "select":
             self.select_minimap()
 
     def save_minimap_position(self, position, preview_image):
         if not self.stop_tracking(show=False):
             return False
+        first_selection = self.minimap_settings.position is None
         self.minimap_settings.save_position(position)
         self.seed = None
         if self.localizer:
@@ -690,13 +816,14 @@ class MainWindow(QMainWindow):
         self.minimap_preview = preview_image.copy()
         self.live_preview_image = None
         self.update_preview(self.minimap_preview, None, "位置设置成功 · 框选截图")
+        if first_selection:
+            self.preview_button.setChecked(True)
         self.update_minimap_status()
         self.state.setText("小地图位置设置成功 · 已保存")
         w, h = position.rect[2:]
         self.metrics.setText(f"小地图范围 {w} × {h} · 所有区域共用")
-        self.detail.setText("左侧预览显示本次框选的小地图截图，可直接检查选框是否正确。\n"
-                            "需要调整时，请重新打开“小地图位置设置”。")
-        self.statusBar().showMessage("小地图位置已自动保存，重启或切换区域后可继续使用。")
+        self.detail.setText("请核对本次框选的小地图截图。需要调整时，可在“小地图位置设置”中重新框选。")
+        self.statusBar().showMessage("小地图位置已自动保存，重启或切换区域后可继续使用。", 4500)
         self.sync_preview()
         return True
 
@@ -734,6 +861,7 @@ class MainWindow(QMainWindow):
                 self.localizer.reset(self.seed)
                 match = self.localizer.locate(mini)
                 self.show_match(mini, match)
+                self.detail.clear()
                 if not match.ok:
                     self.state.setText("地标校准已接受，但当前视觉匹配仍不足")
                     self.detail.setText("校准只提供搜索起点；没有当前画面的匹配证据时不会显示静态路线。\n请尝试细节更清楚的底图，或换到附近有明显道路的位置。")
@@ -759,7 +887,7 @@ class MainWindow(QMainWindow):
                                          self.capture_pause)
             self.worker.result.connect(self.receive_frame)
             self.worker.start()
-            self.track_button.setText("停止叠加  Ctrl+Alt+F9")
+            self.track_button.setText("停止叠加")
             self.screenshot_button.setEnabled(True)
             self.state.setText("正在建立实时定位…")
             if self.minimap_settings.minimize_on_tracking:
@@ -783,7 +911,7 @@ class MainWindow(QMainWindow):
             self.worker.deleteLater()
             self.worker = None
             self.state.setText("叠加已停止")
-        self.track_button.setText("开始叠加  Ctrl+Alt+F9")
+        self.track_button.setText("开始叠加")
         if show:
             self.restore_window()
         return True
@@ -802,7 +930,7 @@ class MainWindow(QMainWindow):
             self.begin_screenshot_mode()
             return
         self.screenshot_pending = True
-        self.screenshot_button.setText("等待定位…  Ctrl+Alt+F11")
+        self.screenshot_button.setText("等待定位…")
         if not native.foreground_is(self.worker.hwnd):
             if self.minimap_settings.minimize_on_tracking:
                 self.showMinimized()
@@ -821,7 +949,7 @@ class MainWindow(QMainWindow):
             return
         self.screenshot_pending = False
         self.last_visible = time.monotonic()
-        self.screenshot_button.setText("退出截图模式  Ctrl+Alt+F11")
+        self.screenshot_button.setText("退出截图模式")
         self.state.setText("截图模式 · 路线已冻结，可以截图")
         if self.preview_worker is not None:
             self.preview_caption.setText("截图模式 · 实时同步已暂停")
@@ -829,7 +957,7 @@ class MainWindow(QMainWindow):
     def end_screenshot_mode(self):
         self.screenshot_pending = False
         self.screenshot_button.setChecked(False)
-        self.screenshot_button.setText("截图模式  Ctrl+Alt+F11")
+        self.screenshot_button.setText("截图模式")
         if not self.capture_pause.paused:
             return
         restored = self.overlay.set_capture_excluded(True)
@@ -942,7 +1070,7 @@ class MainWindow(QMainWindow):
             self.require_project()
             if not self.stop_tracking(show=False):
                 return
-            path, _ = QFileDialog.getOpenFileName(self, "选择带小地图的截图", "", "截图 (*.png *.jpg *.jpeg *.bmp)")
+            path = self.choose_file("选择带小地图的截图", "截图 (*.png *.jpg *.jpeg *.bmp)")
             if not path:
                 return
             image = read_image(path)
@@ -968,7 +1096,8 @@ class MainWindow(QMainWindow):
 
     def choose_color(self):
         if self.project:
-            selected = QColorDialog.getColor(QColor(self.project.color), self, "画笔颜色")
+            selected = QColorDialog.getColor(QColor(self.project.color), self, "画笔颜色",
+                                             QColorDialog.ColorDialogOption.DontUseNativeDialog)
             if selected.isValid():
                 self.project.color = selected.name()
                 self.refresh_brush_color()

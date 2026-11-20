@@ -5,14 +5,14 @@ from pathlib import Path
 import traceback
 
 if sys.platform != "win32":
-    raise SystemExit("此原型目前仅支持 Windows。")
+    raise SystemExit("循图仅支持 Windows。")
 
 from map_overlay.native import enable_dpi_awareness
 enable_dpi_awareness()
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QLibraryInfo, QTimer, QTranslator
 from PySide6.QtWidgets import QApplication
-from map_overlay.app import MainWindow, STYLE
+from map_overlay.app import MainWindow
 
 
 def main():
@@ -20,7 +20,9 @@ def main():
     app.setApplicationName("循图")
     app.setOrganizationName("LocalRouteOverlay")
     app.setStyle("Fusion")
-    app.setStyleSheet(STYLE)
+    translator = QTranslator(app)
+    if translator.load("qtbase_zh_CN", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
+        app.installTranslator(translator)
 
     def report_exception(kind, value, trace):
         from PySide6.QtWidgets import QMessageBox

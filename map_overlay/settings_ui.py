@@ -2,36 +2,12 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QColor, QPainter
-from PySide6.QtWidgets import (QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel,
+from PySide6.QtGui import QPainter, QPalette
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
                               QListWidget, QListWidgetItem, QPushButton,
                               QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
 
-
-SETTINGS_STYLE = """
-QDialog#settingsDialog { background:#0c131a; }
-QDialog#settingsDialog QLabel { background:transparent; }
-QWidget#settingsSidebar { background:#15212c; border-right:1px solid #263744; }
-QLabel#settingsBrand { background:transparent; font-size:20px; font-weight:700; }
-QLabel#settingsHint { background:transparent; color:#91a6b6; font-size:12px; }
-QListWidget#settingsCategories { background:transparent; border:0; outline:0; padding:0; }
-QListWidget#settingsCategories::item { height:42px; padding-left:15px; margin-bottom:6px; border-radius:7px; }
-QListWidget#settingsCategories::item:hover { background:#223441; }
-QListWidget#settingsCategories::item:selected { background:#28483f; color:#81f0cc; }
-QListWidget#settingsCategories::item:focus { border:1px solid #65e7bd; }
-QWidget#settingsContent, QWidget#settingsPage, QScrollArea#settingsScroll,
-QWidget#settingsFooter { background:#0c131a; border:0; }
-QLabel#settingsPageTitle { font-size:22px; font-weight:700; }
-QLabel#settingsSection { color:#b9cbd6; font-weight:600; }
-QFrame#settingsCard { background:#192733; border:1px solid #293d4b; border-radius:10px; }
-QFrame#settingsCard QLabel, QFrame#settingsCard QWidget { background:transparent; }
-QLabel#settingsItemTitle { font-size:14px; font-weight:600; }
-QLabel#settingsDescription { color:#91a6b6; line-height:1.5; }
-QPushButton#settingsClose { text-align:center; padding:7px 22px; }
-QScrollBar:vertical { background:#0c131a; width:8px; }
-QScrollBar::handle:vertical { background:#304553; border-radius:4px; min-height:30px; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
-"""
+from .settings import DEFAULT_THEME, THEME_CHOICES
 
 
 class SettingsSwitch(QCheckBox):
@@ -54,46 +30,44 @@ class SettingsSwitch(QCheckBox):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
-        color = "#32987d" if self.isChecked() else "#526574"
-        painter.setBrush(QColor(color if self.isEnabled() else "#2b3b46"))
+        palette = self.palette()
+        roles = QPalette.ColorRole
+        active = self.isChecked() and self.isEnabled()
+        painter.setBrush(palette.color(roles.Highlight if active else roles.Mid))
         painter.drawRoundedRect(3, 4, 44, 22, 11, 11)
-        painter.setBrush(QColor("#f1faf8"))
+        painter.setBrush(palette.color(roles.HighlightedText if active else roles.Base))
         painter.drawEllipse(27 if self.isChecked() else 6, 7, 16, 16)
         if self.hasFocus():
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QColor("#81f0cc"))
+            painter.setPen(palette.color(roles.Link))
             painter.drawRoundedRect(0, 1, 49, 28, 14, 14)
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, preview_enabled, parent=None, *, minimize_on_tracking=True):
+    def __init__(self, preview_enabled, parent=None, *, minimize_on_tracking=True, theme=DEFAULT_THEME):
         super().__init__(parent)
         self.setObjectName("settingsDialog")
         self.setWindowTitle("设置 · 循图")
-        self.setStyleSheet(SETTINGS_STYLE)
-        self.resize(900, 600)
-        self.setMinimumSize(700, 480)
+        self.resize(780, 490)
+        self.setMinimumSize(620, 390)
         self.category_indexes = {}
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        sidebar = QWidget()
+        sidebar = QFrame()
         sidebar.setObjectName("settingsSidebar")
-        sidebar.setFixedWidth(180)
+        sidebar.setFixedWidth(153)
         navigation = QVBoxLayout(sidebar)
         navigation.setContentsMargins(14, 24, 14, 18)
         navigation.setSpacing(18)
         title = QLabel("设置")
-        title.setObjectName("settingsBrand")
+        title.setObjectName("dialogHeading")
         navigation.addWidget(title)
         self.categories = QListWidget()
         self.categories.setObjectName("settingsCategories")
         self.categories.setAccessibleName("设置分类")
         navigation.addWidget(self.categories, 1)
-        hint = QLabel("循图  /  ROUTE")
-        hint.setObjectName("settingsHint")
-        navigation.addWidget(hint)
         layout.addWidget(sidebar)
 
         content = QWidget()
@@ -108,7 +82,7 @@ class SettingsDialog(QDialog):
         footer_layout = QHBoxLayout(footer)
         footer_layout.setContentsMargins(28, 14, 28, 18)
         saved_hint = QLabel("更改后立即生效并自动保存")
-        saved_hint.setObjectName("settingsHint")
+        saved_hint.setObjectName("muted")
         footer_layout.addWidget(saved_hint, 1)
         close = QPushButton("关闭")
         close.setObjectName("settingsClose")
@@ -118,7 +92,7 @@ class SettingsDialog(QDialog):
         body.addWidget(footer)
         layout.addWidget(content, 1)
 
-        general = self.add_category("general", "通用", "管理程序的日常使用偏好。")
+        general = self.add_category("general", "通用")
         self.add_section(general, "窗口行为")
         self.minimize_toggle = self.add_switch(
             general, "开始叠加后自动最小化",
@@ -131,14 +105,31 @@ class SettingsDialog(QDialog):
             "仅截取画面；关闭后保留最后画面，不影响路线叠加。", preview_enabled)
         general.addStretch()
 
+        appearance = self.add_category("appearance", "外观")
+        card = self.add_card(appearance)
+        row = QHBoxLayout()
+        name = QLabel("外观模式")
+        name.setObjectName("panelHeading")
+        row.addWidget(name, 1)
+        self.theme_picker = QComboBox()
+        self.theme_picker.setAccessibleName("外观模式")
+        self.theme_picker.setMinimumWidth(106)
+        for key, label in THEME_CHOICES:
+            self.theme_picker.addItem(label, key)
+        self.theme_picker.setCurrentIndex(self.theme_picker.findData(theme))
+        row.addWidget(self.theme_picker)
+        card.addLayout(row)
+        appearance.addStretch()
+
         self.categories.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.select_category("general")
 
-    def add_category(self, key, title, description):
+    def add_category(self, key, title):
         """Register a navigation entry and its scrollable page together."""
         self.category_indexes[key] = self.pages.count()
         item = QListWidgetItem(title)
         item.setData(Qt.ItemDataRole.UserRole, key)
+        item.setSizeHint(QSize(0, 38))
         self.categories.addItem(item)
         scroll = QScrollArea()
         scroll.setObjectName("settingsScroll")
@@ -150,9 +141,8 @@ class SettingsDialog(QDialog):
         column.setContentsMargins(28, 26, 28, 20)
         column.setSpacing(16)
         heading = QLabel(title)
-        heading.setObjectName("settingsPageTitle")
+        heading.setObjectName("dialogHeading")
         column.addWidget(heading)
-        column.addWidget(self.description(description))
         scroll.setWidget(page)
         self.pages.addWidget(scroll)
         return column
@@ -165,7 +155,7 @@ class SettingsDialog(QDialog):
         row = QHBoxLayout()
         text = QVBoxLayout()
         name = QLabel(title)
-        name.setObjectName("settingsItemTitle")
+        name.setObjectName("panelHeading")
         text.addWidget(name)
         text.addWidget(self.description(description))
         row.addLayout(text, 1)
@@ -180,14 +170,14 @@ class SettingsDialog(QDialog):
     @staticmethod
     def description(text):
         label = QLabel(text)
-        label.setObjectName("settingsDescription")
+        label.setObjectName("muted")
         label.setWordWrap(True)
         return label
 
     @staticmethod
     def add_section(column, title):
         label = QLabel(title)
-        label.setObjectName("settingsSection")
+        label.setObjectName("section")
         column.addWidget(label)
 
     @staticmethod
