@@ -4,6 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 from functools import partial
 
+import numpy as np
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QTransform
 
@@ -11,6 +12,9 @@ from .project import INK_FORMAT
 
 
 INK_WIDTH = 3
+INK_OUTLINE = 3
+ERASER_DIAMETER = 32
+MAX_ERASER_DIAMETER = 512
 UNDO_BYTES = 64 * 1024**2
 UNDO_STEPS = 100
 
@@ -19,6 +23,7 @@ UNDO_STEPS = 100
 class Stroke:
     path: QPainterPath
     color: str
+    width: int = INK_WIDTH
 
     def add_point(self, point):
         offset = point - self.path.currentPosition()
@@ -26,15 +31,30 @@ class Stroke:
             self.path.lineTo(point)
 
 
-def paint_stroke(painter, stroke):
+def paint_ink_path(painter, path, color, width):
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    for color, width in [(QColor(7, 21, 27, 200), INK_WIDTH + 3), (QColor(stroke.color), INK_WIDTH)]:
-        painter.setPen(QPen(color, width, Qt.PenStyle.SolidLine,
-                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        if stroke.path.isEmpty():
-            painter.drawPoint(stroke.path.currentPosition())
-        else:
-            painter.drawPath(stroke.path)
+    painter.setPen(QPen(color, width, Qt.PenStyle.SolidLine,
+                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    if path.isEmpty():
+        painter.drawPoint(path.currentPosition())
+    else:
+        painter.drawPath(path)
+
+
+def paint_stroke(painter, stroke):
+    paint_ink_path(painter, stroke.path, QColor(7, 21, 27, 200), stroke.width + INK_OUTLINE)
+    paint_ink_path(painter, stroke.path, QColor(stroke.color), stroke.width)
+
+
+def erase_ink(ink, path, diameter):
+    with QPainter(ink) as painter:
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        paint_ink_path(painter, path, QColor(Qt.GlobalColor.black), diameter)
+
+
+def ink_path_rect(path, width, bounds):
+    margin = width / 2 + 1
+    return path.boundingRect().adjusted(-margin, -margin, margin, margin).toAlignedRect().intersected(bounds)
 
 
 def affine_transform(matrix):
@@ -50,17 +70,18 @@ def marker_rect(marker, center, units_per_pixel=1.0):
 
 
 def paint_annotations(painter, project, ref_to_view, visible, units_per_pixel=1.0,
-                      strokes=(), markers=None, ink_opacity=1.0):
+                      strokes=(), markers=None, ink_opacity=1.0, *, ink_preview=None):
     painter.save()
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-    if project.ink is not None or strokes:
+    ink = project.ink if ink_preview is None else ink_preview
+    if ink is not None or strokes:
         painter.save()
         painter.setOpacity(painter.opacity() * ink_opacity)
         painter.setWorldTransform(ref_to_view, combine=True)
         h, w = project.image.shape[:2]
         painter.setClipRect(QRectF(0, 0, w, h), Qt.ClipOperation.IntersectClip)
-        if project.ink is not None:
-            painter.drawImage(0, 0, project.ink)
+        if ink is not None:
+            painter.drawImage(0, 0, ink)
         for stroke in strokes:
             paint_stroke(painter, stroke)
         painter.restore()
@@ -109,9 +130,7 @@ class AnnotationEdits:
 
     def draw(self, stroke):
         h, w = self.project.image.shape[:2]
-        margin = (INK_WIDTH + 3) / 2 + 1
-        bounds = stroke.path.boundingRect().adjusted(-margin, -margin, margin, margin)
-        rect = bounds.toAlignedRect().intersected(QRect(0, 0, w, h))
+        rect = ink_path_rect(stroke.path, stroke.width + INK_OUTLINE, QRect(0, 0, w, h))
         if rect.isEmpty():
             return False
         before = None
@@ -126,10 +145,25 @@ class AnnotationEdits:
         self.remember(partial(self.restore_ink, rect, before), 0 if before is None else before.sizeInBytes())
         return True
 
+    def commit_erasure(self, preview, path, diameter):
+        original = self.project.ink
+        if original == preview:
+            return False
+        rect = ink_path_rect(path, diameter, original.rect())
+        before = original.copy(rect)
+        # Fully transparent pixels are zero in the premultiplied ink format.
+        self.project.ink = preview if np.frombuffer(preview.constBits(), np.uint32).any() else None
+        self.remember(partial(self.restore_ink, rect, before), before.sizeInBytes())
+        return True
+
     def restore_ink(self, rect, before):
         if before is None:
             self.project.ink = None
         else:
+            if self.project.ink is None:
+                h, w = self.project.image.shape[:2]
+                self.project.ink = QImage(w, h, INK_FORMAT)
+                self.project.ink.fill(Qt.GlobalColor.transparent)
             with QPainter(self.project.ink) as painter:
                 painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
                 painter.drawImage(rect.topLeft(), before)

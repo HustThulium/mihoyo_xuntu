@@ -5,8 +5,28 @@ $projectPython = Join-Path $PSScriptRoot '.venv/Scripts/python.exe'
 if (-not (Test-Path -LiteralPath $projectPython)) {
     throw 'Create .venv and install requirements-lock.txt first. See README.md.'
 }
-& $projectPython -m PyInstaller --noconfirm 'packaging/route_overlay.spec'
-if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed.' }
+$packageDir = Join-Path $PSScriptRoot 'dist/RouteOverlay'
+$settingsPath = Join-Path $packageDir 'settings.json'
+$settingsBackup = $null
+if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
+    $backupDir = Join-Path $PSScriptRoot '.cache'
+    New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+    $settingsBackup = Join-Path $backupDir ([IO.Path]::GetRandomFileName() + '.settings.json')
+    [IO.File]::Copy($settingsPath, $settingsBackup)
+}
+try {
+    & $projectPython -m PyInstaller --noconfirm 'packaging/route_overlay.spec'
+    if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed.' }
+} finally {
+    if ($settingsBackup) {
+        # COLLECT replaces the output folder. Preserve the local configuration across builds.
+        if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
+            New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
+            [IO.File]::Copy($settingsBackup, $settingsPath)
+        }
+        Remove-Item -LiteralPath $settingsBackup
+    }
+}
 Copy-Item -LiteralPath 'README.md', 'THIRD_PARTY_NOTICES.md' -Destination 'dist/RouteOverlay'
 $licenseRoot = Join-Path $PSScriptRoot 'dist/RouteOverlay/THIRD_PARTY_LICENSES'
 New-Item -ItemType Directory -Path $licenseRoot -Force | Out-Null

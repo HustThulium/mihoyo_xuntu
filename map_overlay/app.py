@@ -8,20 +8,21 @@ from PySide6.QtGui import QPainter, QPixmap, QKeySequence, QShortcut, QColor
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
                               QVBoxLayout, QPushButton, QLabel, QFileDialog,
                               QMessageBox, QComboBox, QSplitter, QFrame,
-                              QInputDialog, QColorDialog, QSpinBox, QSlider)
+                              QInputDialog, QColorDialog, QSlider, QButtonGroup,
+                              QGroupBox, QRadioButton)
 
 from . import native
-from .annotations import affine_transform, paint_minimap
+from .annotations import MAX_ERASER_DIAMETER, affine_transform, paint_minimap
 from .capture import CapturePause, TrackingWorker, PreviewWorker, grab
 from .geometry import inverse
-from .project import Project, read_image, read_marker_asset, MIN_MARKER_SIZE, MAX_MARKER_SIZE
+from .project import Project, read_image
 from .route_import import RouteExtraction
 from .route_import_ui import RouteAreaDialog, RouteMatchDialog, RoutePreviewDialog
-from .settings import MinimapPosition, MinimapSettings
+from .settings import MinimapPosition, MinimapSettings, portable_settings_path
 from .settings_ui import SettingsDialog
 from .vision import Localizer
 from .widgets import (AnnotationView, RegionDialog, CalibrationDialog,
-                      RouteOverlay, MinimapSettingsDialog, qimage)
+                      RouteOverlay, MinimapSettingsDialog, ink_size_control, qimage)
 
 
 STYLE = """
@@ -37,6 +38,7 @@ QPushButton#primary { background:#22745f; border-color:#32987d; color:white; fon
 QPushButton#primary:enabled:hover { background:#2d8c73; }
 QPushButton#primary:disabled { background:#252a2e; border-color:#383e43; color:#92999e; }
 QPushButton#screenshotMode:checked { background:#28483f; border-color:#32987d; color:#e7f4f2; }
+QPushButton#annotationTool:enabled:checked { background:#28483f; border-color:#32987d; color:#e7f4f2; }
 QPushButton#settingsButton { padding:0; text-align:center; font-family:'Segoe UI Symbol'; font-size:21px; }
 QComboBox { background:#1a2a37; border:1px solid #2b4050; border-radius:6px; padding:7px; }
 QComboBox QAbstractItemView { background:#1a2a37; selection-background-color:#22745f; }
@@ -71,9 +73,13 @@ class MainWindow(QMainWindow):
         self.last_preview_matrix = None
         self.minimap_preview = None
         self.preview_at = 0
+        legacy_path = None
         if settings_path is None:
-            settings_path = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)) / "settings.json"
-        self.minimap_settings = MinimapSettings(settings_path)
+            settings_path = portable_settings_path()
+            app_data = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
+            if app_data:
+                legacy_path = Path(app_data) / "settings.json"
+        self.minimap_settings = MinimapSettings(settings_path, legacy_path=legacy_path)
         self.overlay = RouteOverlay(self.minimap_settings.ink_opacity / 100)
         self.build_ui()
         self.refresh_windows()
@@ -148,6 +154,22 @@ class MainWindow(QMainWindow):
             item.clicked.connect(callback)
             row.addWidget(item, 1)
         side.addLayout(row)
+        opacity_row = QHBoxLayout()
+        opacity_row.addWidget(QLabel("小地图墨迹不透明度"))
+        self.ink_slider = QSlider(Qt.Orientation.Horizontal)
+        self.ink_slider.setAccessibleName("小地图墨迹不透明度")
+        self.ink_slider.setToolTip("向右拖动让墨迹更清晰，100% 为完全不透明")
+        self.ink_slider.setRange(0, 100)
+        self.ink_slider.setValue(self.minimap_settings.ink_opacity)
+        self.ink_slider.setTracking(False)
+        self.ink_percentage = QLabel(f"{self.ink_slider.value()}%")
+        self.ink_percentage.setMinimumWidth(self.ink_percentage.fontMetrics().horizontalAdvance("100%"))
+        self.ink_percentage.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.ink_slider.sliderMoved.connect(self.show_ink_opacity)
+        self.ink_slider.valueChanged.connect(self.save_ink_opacity)
+        opacity_row.addWidget(self.ink_slider, 1)
+        opacity_row.addWidget(self.ink_percentage)
+        side.addLayout(opacity_row)
         section("03  小地图定位与叠加")
         button("辅助校准：选择对应地标", self.calibrate_minimap)
         self.track_button = button("开始叠加  Ctrl+Alt+F9", self.toggle_tracking, True)
@@ -176,57 +198,11 @@ class MainWindow(QMainWindow):
         content = QVBoxLayout()
         self.area_label = QLabel("还没有区域 · 从游戏大地图建立或打开已有区域")
         self.area_label.setStyleSheet("font-size:16px; font-weight:600;")
-        area_row = QHBoxLayout()
-        area_row.addWidget(self.area_label, 1)
-        area_row.addWidget(QLabel("小地图墨迹不透明度"))
-        self.ink_slider = QSlider(Qt.Orientation.Horizontal)
-        self.ink_slider.setAccessibleName("小地图墨迹不透明度")
-        self.ink_slider.setToolTip("向右拖动让墨迹更清晰，100% 为完全不透明")
-        self.ink_slider.setRange(0, 100)
-        self.ink_slider.setFixedWidth(130)
-        self.ink_slider.setValue(self.minimap_settings.ink_opacity)
-        self.ink_slider.setTracking(False)
-        self.ink_percentage = QLabel(f"{self.ink_slider.value()}%")
-        self.ink_percentage.setMinimumWidth(self.ink_percentage.fontMetrics().horizontalAdvance("100%"))
-        self.ink_slider.sliderMoved.connect(self.show_ink_opacity)
-        self.ink_slider.valueChanged.connect(self.save_ink_opacity)
-        area_row.addWidget(self.ink_slider)
-        area_row.addWidget(self.ink_percentage)
-        content.addLayout(area_row)
-        tools = QHBoxLayout()
+        content.addWidget(self.area_label)
         self.canvas = AnnotationView()
-        self.mode = QComboBox()
-        for label, mode in [("画笔", "draw"), ("标记", "marker"), ("浏览", "view")]:
-            self.mode.addItem(label, mode)
-        self.mode.currentIndexChanged.connect(self.change_canvas_mode)
-        tools.addWidget(self.mode)
-        self.brush_button = QPushButton("画笔颜色…")
-        self.brush_button.clicked.connect(self.choose_color)
-        tools.addWidget(self.brush_button)
-        self.import_marker_button = QPushButton("导入 PNG 标记…")
-        self.import_marker_button.clicked.connect(self.import_marker)
-        tools.addWidget(self.import_marker_button)
-        self.marker_size = QSpinBox()
-        self.marker_size.setRange(MIN_MARKER_SIZE, MAX_MARKER_SIZE)
-        self.marker_size.setPrefix("大小 ")
-        self.marker_size.setSuffix(" px")
-        self.marker_size.setKeyboardTracking(False)
-        self.marker_size.setToolTip("标记在画面中的最长边")
-        self.marker_size.valueChanged.connect(self.canvas.change_marker_size)
-        tools.addWidget(self.marker_size)
-        self.delete_marker = QPushButton("删除标记")
-        self.delete_marker.clicked.connect(self.canvas.delete_marker)
-        tools.addWidget(self.delete_marker)
-        tools.addStretch(1)
-        fit = QPushButton("适应窗口")
-        fit.clicked.connect(lambda: self.canvas.fit_image())
-        tools.addWidget(fit)
-        content.addLayout(tools)
+        self.build_annotation_tools(content)
         splitter = QSplitter(Qt.Orientation.Vertical)
         self.canvas.changed.connect(self.annotations_changed)
-        self.canvas.marker_selected.connect(self.marker_selection_changed)
-        self.canvas.placement_changed.connect(self.marker_placement_changed)
-        self.canvas.placement_failed.connect(self.error)
         self.refresh_annotation_controls()
         splitter.addWidget(self.canvas)
         diagnostics = QWidget()
@@ -254,7 +230,7 @@ class MainWindow(QMainWindow):
         self.metrics.setWordWrap(True)
         self.metrics.setObjectName("muted")
         info.addWidget(self.metrics)
-        self.detail = QLabel("画笔模式下拖动画线。标记模式下可以选中图标并拖动，或调整大小。\n浏览模式下拖动地图，滚轮缩放。")
+        self.detail = QLabel("用画笔、直线或橡皮擦编辑墨迹，Ctrl+Z 撤销。\n切换到浏览可拖动地图，滚轮缩放。")
         self.detail.setObjectName("muted")
         self.detail.setWordWrap(True)
         info.addWidget(self.detail)
@@ -270,6 +246,44 @@ class MainWindow(QMainWindow):
         self.preview_toggle = self.settings_dialog.preview_toggle
         self.preview_toggle.toggled.connect(self.toggle_preview)
         self.settings_dialog.minimize_toggle.toggled.connect(self.toggle_minimize_on_tracking)
+
+    def build_annotation_tools(self, content):
+        self.annotation_toolbar = QWidget()
+        tools = QHBoxLayout(self.annotation_toolbar)
+        tools.setContentsMargins(0, 0, 0, 0)
+        tool_group = QButtonGroup(self.annotation_toolbar)
+        for label, mode in [("画笔", "draw"), ("直线", "line"), ("橡皮擦", "erase"), ("浏览", "view")]:
+            button = QPushButton(label)
+            button.setObjectName("annotationTool")
+            button.setCheckable(True)
+            button.setChecked(mode == self.canvas.mode)
+            button.toggled.connect(lambda checked, mode=mode: checked and self.change_canvas_mode(mode))
+            tool_group.addButton(button)
+            tools.addWidget(button)
+        self.brush_button = QPushButton("画笔颜色…")
+        self.brush_button.clicked.connect(self.choose_color)
+        tools.addWidget(self.brush_button)
+        self.line_width = ink_size_control("线宽", 24, self.canvas.ink_width)
+        self.line_width.valueChanged.connect(self.canvas.set_ink_width)
+        tools.addWidget(self.line_width)
+        self.eraser_size = ink_size_control("直径", MAX_ERASER_DIAMETER, self.canvas.eraser_diameter)
+        self.eraser_size.valueChanged.connect(self.canvas.set_eraser_diameter)
+        tools.addWidget(self.eraser_size)
+        tools.addStretch(1)
+
+        display = QGroupBox("显示内容")
+        options = QHBoxLayout(display)
+        composite = QRadioButton("叠加底图")
+        composite.setChecked(True)
+        ink_only = QRadioButton("只看墨迹")
+        ink_only.toggled.connect(self.canvas.set_ink_only)
+        options.addWidget(composite)
+        options.addWidget(ink_only)
+        tools.addWidget(display)
+        fit = QPushButton("适应窗口")
+        fit.clicked.connect(self.canvas.fit_image)
+        tools.addWidget(fit)
+        content.addWidget(self.annotation_toolbar)
 
     def error(self, exception):
         QMessageBox.warning(self, "无法完成操作", str(exception))
@@ -446,7 +460,7 @@ class MainWindow(QMainWindow):
         self.dirty = path is None
         self.refresh_annotation_controls()
         self.update_label()
-        self.state.setText("底图已准备 · 可以画线或放置标记")
+        self.state.setText("底图已准备 · 可以绘制或导入路线")
         self.metrics.setText(f"底图 {project.image.shape[1]} × {project.image.shape[0]} · 特征点 {len(self.localizer.points)}")
         if self.live_preview_image is not None:
             self.update_preview(self.live_preview_image, None)
@@ -462,7 +476,10 @@ class MainWindow(QMainWindow):
 
     def update_label(self):
         if self.project:
-            self.area_label.setText(f"{self.project.name}{' *' if self.dirty else ''}  ·  {len(self.project.markers)} 个标记")
+            label = f"{self.project.name}{' *' if self.dirty else ''}"
+            if self.project.markers:
+                label += f"  ·  {len(self.project.markers)} 个标记"
+            self.area_label.setText(label)
 
     def annotations_changed(self):
         if self.project:
@@ -471,46 +488,23 @@ class MainWindow(QMainWindow):
             if self.last_preview is not None:
                 self.update_preview(self.last_preview, self.last_preview_matrix)
 
-    def change_canvas_mode(self):
-        self.canvas.set_mode(self.mode.currentData())
+    def change_canvas_mode(self, mode):
+        self.canvas.set_mode(mode)
         self.refresh_annotation_controls()
 
     def refresh_annotation_controls(self):
         active = self.project is not None
-        self.mode.setEnabled(active)
-        self.brush_button.setEnabled(active)
-        self.import_marker_button.setEnabled(active)
+        self.annotation_toolbar.setEnabled(active)
+        drawing = self.canvas.mode in ("draw", "line")
+        self.brush_button.setVisible(drawing)
+        self.line_width.setVisible(drawing)
+        self.eraser_size.setVisible(self.canvas.mode == "erase")
         self.import_route_button.setEnabled(active)
         self.refresh_brush_color()
-        self.marker_selection_changed(None)
 
     def refresh_brush_color(self):
         if self.project is not None:
             self.brush_button.setStyleSheet(f"border-left: 4px solid {self.project.color};")
-
-    def marker_selection_changed(self, marker):
-        self.marker_size.blockSignals(True)
-        self.marker_size.setValue(marker.size if marker is not None else self.canvas.placement_size)
-        self.marker_size.blockSignals(False)
-        self.marker_size.setEnabled(self.project is not None and self.canvas.mode == "marker")
-        self.delete_marker.setEnabled(marker is not None)
-
-    def marker_placement_changed(self, active):
-        if active:
-            self.statusBar().showMessage("点击底图放置图标，可连续放置。按 Esc 结束放置。")
-        else:
-            self.statusBar().clearMessage()
-
-    def import_marker(self):
-        try:
-            self.require_project()
-            path, _ = QFileDialog.getOpenFileName(self, "导入 PNG 标记", "", "PNG 图片 (*.png)")
-            if path:
-                asset = read_marker_asset(path)
-                self.mode.setCurrentIndex(self.mode.findData("marker"))
-                self.canvas.prepare_marker(asset)
-        except (ValueError, OSError) as exc:
-            self.error(exc)
 
     def import_route(self):
         if self.busy or self.project is None:
@@ -759,7 +753,7 @@ class MainWindow(QMainWindow):
             native.monitor_for(box)
             position = self.minimap_settings.require_position(box[2:])
             if not self.project.has_annotations:
-                raise ValueError("请先画线或放置一个标记，再开始叠加。")
+                raise ValueError("请先绘制或导入路线墨迹，再开始叠加。")
             self.generation += 1
             self.worker = TrackingWorker(self.project.image, target, position, self.generation, self.seed,
                                          self.capture_pause)

@@ -6,13 +6,13 @@ import math
 import cv2
 from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QRect
 from PySide6.QtGui import (QImage, QPixmap, QPainter, QPainterPath, QPen, QColor,
-                           QBrush, QGuiApplication, QTransform)
+                           QBrush, QGuiApplication, QTransform, QFont)
 from PySide6.QtWidgets import (QWidget, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                               QPushButton, QDialogButtonBox, QGraphicsView,
-                              QGraphicsScene)
+                              QGraphicsScene, QSpinBox)
 
-from .annotations import (AnnotationEdits, Stroke, affine_transform, marker_rect,
-                          paint_annotations, paint_minimap)
+from .annotations import (AnnotationEdits, Stroke, INK_WIDTH, ERASER_DIAMETER,
+                          affine_transform, erase_ink, marker_rect, paint_annotations, paint_minimap)
 from .geometry import inverse, similarity
 from .project import DEFAULT_MARKER_SIZE, Marker
 from . import native
@@ -22,6 +22,35 @@ def qimage(bgr):
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     h, w = rgb.shape[:2]
     return QImage(rgb.data, w, h, int(rgb.strides[0]), QImage.Format.Format_RGB888).copy()
+
+
+def ink_size_control(label, maximum, value):
+    control = QSpinBox()
+    control.setRange(1, maximum)
+    control.setPrefix(f"{label} ")
+    control.setSuffix(" px")
+    control.setAccessibleName(label)
+    control.setValue(value)
+    return control
+
+
+def ink_checkerboard():
+    tile = QPixmap(24, 24)
+    tile.fill(QColor("#465058"))
+    with QPainter(tile) as painter:
+        for offset in (0, 12):
+            painter.fillRect(offset, offset, 12, 12, QColor("#59636b"))
+    return QBrush(tile)
+
+
+def paint_eraser_cursor(painter, point, diameter):
+    radius = diameter / 2
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    for color, width in [("black", 3), ("white", 1)]:
+        pen = QPen(QColor(color), width)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        painter.drawEllipse(point, radius, radius)
 
 
 class ImageView(QGraphicsView):
@@ -39,6 +68,7 @@ class ImageView(QGraphicsView):
         self.selection = None
         self.markers = []
         self.selection_item = None
+        self.image_item = None
         self._zoomed = False
         ImageView.set_mode(self, mode)
         if image is not None:
@@ -48,7 +78,7 @@ class ImageView(QGraphicsView):
         self.image = image
         self.scene().clear()
         self.markers = []
-        self.scene().addPixmap(QPixmap.fromImage(qimage(image)))
+        self.image_item = self.scene().addPixmap(QPixmap.fromImage(qimage(image)))
         self.scene().setSceneRect(0, 0, image.shape[1], image.shape[0])
         self.selection_item = self.scene().addRect(QRectF(), QPen(QColor("#ffce73"), 2))
         self.selection_item.hide()
@@ -144,6 +174,12 @@ class AnnotationView(ImageView):
         self.project = None
         self.edits = None
         self.stroke = None
+        self.ink_width = INK_WIDTH
+        self.eraser_diameter = ERASER_DIAMETER
+        self.erase_preview = None
+        self.eraser_pointer = None
+        self.ink_only = False
+        self.checker = ink_checkerboard()
         self.pending_asset = None
         self.placement_size = DEFAULT_MARKER_SIZE
         self.selected_marker = None
@@ -156,12 +192,29 @@ class AnnotationView(ImageView):
         self.placement_size = DEFAULT_MARKER_SIZE
         self.set_mode(self.mode)
         self.set_image(project.image)
+        self.set_ink_only(self.ink_only)
 
     def set_mode(self, mode):
         super().set_mode(mode)
+        self.viewport().setMouseTracking(mode == "erase")
         self.stroke = None
+        self.erase_preview = None
+        self.eraser_pointer = None
         self.cancel_placement()
         self.select_marker(None)
+
+    def set_ink_only(self, enabled):
+        self.ink_only = enabled
+        if self.image_item is not None:
+            self.image_item.setVisible(not enabled)
+        self.viewport().update()
+
+    def set_ink_width(self, width):
+        self.ink_width = width
+
+    def set_eraser_diameter(self, diameter):
+        self.eraser_diameter = diameter
+        self.viewport().update()
 
     def select_marker(self, index):
         self.selected_marker = index
@@ -197,8 +250,11 @@ class AnnotationView(ImageView):
             self.changed.emit()
 
     def undo(self):
+        if self.stroke is not None:
+            self.stroke = self.erase_preview = None
+            self.viewport().update()
+            return
         if self.edits is not None and self.edits.undo():
-            self.stroke = None
             self.select_marker(None)
             self.changed.emit()
 
@@ -210,13 +266,19 @@ class AnnotationView(ImageView):
             return
         painter.save()
         painter.setClipRect(self.sceneRect(), Qt.ClipOperation.IntersectClip)
-        markers = self.project.markers
-        if self.dragged_marker is not None:
+        if self.ink_only:
+            painter.fillRect(exposed, self.checker)
+        markers = () if self.ink_only else self.project.markers
+        if not self.ink_only and self.dragged_marker is not None:
             markers = markers.copy()
             markers[self.selected_marker] = self.dragged_marker
-        strokes = () if self.stroke is None else (self.stroke,)
-        paint_annotations(painter, self.project, QTransform(), exposed, 1 / self.transform().m11(), strokes, markers)
-        if self.selected_marker is not None:
+        strokes = (self.stroke,) if self.stroke is not None and self.mode != "erase" else ()
+        paint_annotations(painter, self.project, QTransform(), exposed, 1 / self.transform().m11(),
+                          strokes, markers, ink_preview=self.erase_preview)
+        if self.mode == "erase" and self.eraser_pointer is not None:
+            diameter = self.stroke.width if self.stroke is not None else self.eraser_diameter
+            paint_eraser_cursor(painter, self.eraser_pointer, diameter)
+        if not self.ink_only and self.selected_marker is not None:
             pen = QPen(QColor("#ffce73"), 1, Qt.PenStyle.DashLine)
             pen.setCosmetic(True)
             painter.setPen(pen)
@@ -229,10 +291,17 @@ class AnnotationView(ImageView):
             point = self.mapToScene(event.position().toPoint())
             if not (0 <= point.x() < self.sceneRect().width() and 0 <= point.y() < self.sceneRect().height()):
                 self.select_marker(None)
-            elif self.mode == "draw":
-                self.stroke = Stroke(QPainterPath(point), self.project.color)
+            elif self.mode in ("draw", "line"):
+                self.stroke = Stroke(QPainterPath(point), self.project.color, self.ink_width)
                 self.viewport().update()
-            elif self.pending_asset is not None:
+            elif self.mode == "erase":
+                self.eraser_pointer = point
+                if self.project.ink is not None:
+                    self.stroke = Stroke(QPainterPath(point), self.project.color, self.eraser_diameter)
+                    self.erase_preview = QImage(self.project.ink)
+                    erase_ink(self.erase_preview, self.stroke.path, self.stroke.width)
+                self.viewport().update()
+            elif self.mode == "marker" and not self.ink_only and self.pending_asset is not None:
                 try:
                     self.edits.add_marker(Marker(self.pending_asset, point.x(), point.y(), self.placement_size))
                 except ValueError as exc:
@@ -241,7 +310,7 @@ class AnnotationView(ImageView):
                 else:
                     self.viewport().update()
                     self.changed.emit()
-            else:
+            elif self.mode == "marker" and not self.ink_only:
                 index = next((i for i in range(len(self.project.markers) - 1, -1, -1)
                               if self.marker_bounds(self.project.markers[i]).contains(point)), None)
                 self.select_marker(index)
@@ -250,15 +319,43 @@ class AnnotationView(ImageView):
             return
         super().mousePressEvent(event)
 
+    def extend_stroke(self, point):
+        stroke = self.stroke
+        if self.mode == "line":
+            first = stroke.path.elementAt(0)
+            start = QPointF(first.x, first.y)
+            stroke.path = QPainterPath(start)
+            if start != point:
+                stroke.path.lineTo(point)
+        elif self.mode == "erase":
+            previous = stroke.path.currentPosition()
+            if previous != point:
+                stroke.path.lineTo(point)
+                segment = QPainterPath(previous)
+                segment.lineTo(point)
+                erase_ink(self.erase_preview, segment, stroke.width)
+        else:
+            stroke.add_point(point)
+
     def mouseMoveEvent(self, event):
         point = self.mapToScene(event.position().toPoint())
+        if self.mode == "erase":
+            self.eraser_pointer = point
         if self.stroke is not None:
-            self.stroke.add_point(point)
+            self.extend_stroke(point)
+            self.viewport().update()
+        elif self.mode == "erase":
             self.viewport().update()
         elif self.drag_start is not None:
             self.move_marker(point)
         else:
             super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        if self.eraser_pointer is not None:
+            self.eraser_pointer = None
+            self.viewport().update()
+        super().leaveEvent(event)
 
     def move_marker(self, point):
         delta = point - self.drag_start
@@ -276,9 +373,15 @@ class AnnotationView(ImageView):
         if event.button() == Qt.MouseButton.LeftButton:
             point = self.mapToScene(event.position().toPoint())
             if self.stroke is not None:
+                self.extend_stroke(point)
                 stroke, self.stroke = self.stroke, None
-                stroke.add_point(point)
-                if self.edits.draw(stroke):
+                if self.erase_preview is not None:
+                    self.eraser_pointer = point
+                    preview, self.erase_preview = self.erase_preview, None
+                    changed = self.edits.commit_erasure(preview, stroke.path, stroke.width)
+                else:
+                    changed = self.edits.draw(stroke)
+                if changed:
                     self.changed.emit()
                 self.viewport().update()
                 return
@@ -292,7 +395,10 @@ class AnnotationView(ImageView):
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event):
-        if self.mode == "marker" and event.key() == Qt.Key.Key_Escape:
+        if self.stroke is not None and event.key() == Qt.Key.Key_Escape:
+            self.stroke = self.erase_preview = None
+            self.viewport().update()
+        elif self.mode == "marker" and event.key() == Qt.Key.Key_Escape:
             self.cancel_placement()
             self.select_marker(None)
         elif self.mode == "marker" and event.key() == Qt.Key.Key_Delete:
@@ -512,7 +618,26 @@ class RouteOverlay(QWidget):
     def paintEvent(self, _):
         if self.project is None:
             return
-        painter = QPainter(self)
-        painter.scale(self.width() / self.pixel_size[0], self.height() / self.pixel_size[1])
         w, h = self.pixel_size
-        paint_minimap(painter, self.project, self.matrix, QRectF(0, 0, w, h), self.pixel_ratio, self.ink_opacity)
+        frame = QRectF(0, 0, w, h)
+        with QPainter(self) as painter:
+            painter.scale(self.width() / w, self.height() / h)
+            paint_minimap(painter, self.project, self.matrix, frame, self.pixel_ratio, self.ink_opacity)
+            self.paint_watermark(painter, frame)
+
+    def paint_watermark(self, painter, frame):
+        size = min(frame.width(), frame.height())
+        font = QFont("Microsoft YaHei UI")
+        font.setWeight(QFont.Weight.DemiBold)
+        font.setPixelSize(max(1, round(min(size * .125, 21 * self.pixel_ratio))))
+        text = QPainterPath()
+        text.addText(0, 0, font, "循图墨迹层")
+        bounds = text.boundingRect()
+        center = frame.center()
+        top = center.y() - size / 2
+        text.translate(center.x() - bounds.center().x(), top + size * .23 - bounds.center().y())
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        outline = QPen(QColor(0, 0, 0, 80), 1.3 * self.pixel_ratio)
+        outline.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.strokePath(text, outline)
+        painter.fillPath(text, QColor(255, 255, 255, 107))

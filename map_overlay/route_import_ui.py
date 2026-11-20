@@ -3,13 +3,13 @@ from __future__ import annotations
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import (QBrush, QColor, QImage, QKeySequence, QPainter,
-                           QPainterPath, QPen, QPixmap, QPolygonF, QShortcut, QTransform)
+                           QPainterPath, QPen, QPolygonF, QShortcut, QTransform)
 from PySide6.QtWidgets import (QCheckBox, QRadioButton, QDialog, QGroupBox, QHBoxLayout, QLabel, QPushButton,
-                               QSlider, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
+                              QSlider, QStackedWidget, QVBoxLayout, QWidget)
 
-from .annotations import paint_markers
+from .annotations import ERASER_DIAMETER, MAX_ERASER_DIAMETER, erase_ink, paint_markers
 from .geometry import transform_points
-from .widgets import ImageView
+from .widgets import ImageView, ink_checkerboard, ink_size_control, paint_eraser_cursor
 
 
 class RouteAreaDialog(QDialog):
@@ -122,23 +122,11 @@ class RouteMatchDialog(QDialog):
         self.reject()
 
 
-def erase(ink, path, diameter):
-    with QPainter(ink) as painter:
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(Qt.GlobalColor.black, diameter, Qt.PenStyle.SolidLine,
-                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        if path.isEmpty():
-            painter.drawPoint(path.currentPosition())
-        else:
-            painter.drawPath(path)
-
-
 class InkPreview(ImageView):
     def __init__(self, extraction, project):
         self.ink = None
         self.ink_only = False
-        self.diameter = 32
+        self.diameter = ERASER_DIAMETER
         self.pointer = None
         self.path = None
         self.actions = []
@@ -148,12 +136,7 @@ class InkPreview(ImageView):
         self.sensitivity = 65
         super().__init__(project.image)
         self.viewport().setMouseTracking(True)
-        tile = QPixmap(24, 24)
-        tile.fill(QColor("#465058"))
-        with QPainter(tile) as painter:
-            for x, y in [(0, 0), (12, 12)]:
-                painter.fillRect(x, y, 12, 12, QColor("#59636b"))
-        self.checker = QBrush(tile)
+        self.checker = ink_checkerboard()
         self.rebuild()
 
     def fit_import(self):
@@ -168,7 +151,7 @@ class InkPreview(ImageView):
         self.ink = self.extraction.image(self.sensitivity, self.cleaned)
         for path, diameter in self.actions:
             if path is not None:
-                erase(self.ink, path, diameter)
+                erase_ink(self.ink, path, diameter)
         self.viewport().update()
 
     def clean(self):
@@ -195,21 +178,14 @@ class InkPreview(ImageView):
         if not self.ink_only:
             paint_markers(painter, self.project.markers, QTransform(), rect, 1 / self.transform().m11())
         if self.mode == "erase" and self.pointer is not None:
-            radius = self.diameter / 2
-            for color, width in [("black", 3), ("white", 1)]:
-                pen = QPen(QColor(color))
-                pen.setCosmetic(True)
-                pen.setWidth(width)
-                painter.setPen(pen)
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawEllipse(self.pointer, radius, radius)
+            paint_eraser_cursor(painter, self.pointer, self.diameter)
         painter.restore()
 
     def mousePressEvent(self, event):
         if self.mode == "erase" and event.button() == Qt.MouseButton.LeftButton and self.image_point(event):
             self.pointer = self.mapToScene(event.position().toPoint())
             self.path = QPainterPath(self.pointer - self.origin)
-            erase(self.ink, self.path, self.diameter)
+            erase_ink(self.ink, self.path, self.diameter)
             self.viewport().update()
             return
         super().mousePressEvent(event)
@@ -221,7 +197,7 @@ class InkPreview(ImageView):
             self.path.lineTo(point)
             segment = QPainterPath(previous)
             segment.lineTo(point)
-            erase(self.ink, segment, self.diameter)
+            erase_ink(self.ink, segment, self.diameter)
 
     def mouseMoveEvent(self, event):
         self.pointer = self.mapToScene(event.position().toPoint())
@@ -304,11 +280,7 @@ class RoutePreviewDialog(QDialog):
         self.eraser.setChecked(True)
         self.eraser.toggled.connect(self.set_tool)
         row.addWidget(self.eraser)
-        self.size = QSpinBox()
-        self.size.setRange(1, 512)
-        self.size.setPrefix("直径 ")
-        self.size.setSuffix(" px")
-        self.size.setValue(self.view.diameter)
+        self.size = ink_size_control("直径", MAX_ERASER_DIAMETER, self.view.diameter)
         self.size.valueChanged.connect(self.set_diameter)
         row.addWidget(self.size)
         undo = QPushButton("撤销清理 / 擦除")

@@ -5,10 +5,19 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 
 
 DEFAULT_INK_OPACITY = 70
+
+
+def portable_settings_path():
+    if getattr(sys, "frozen", False):
+        folder = Path(sys.executable).parent
+    else:
+        folder = Path(__file__).resolve().parents[1]
+    return folder / "settings.json"
 
 
 @dataclass(frozen=True)
@@ -49,7 +58,7 @@ class MinimapPosition:
 
 
 class MinimapSettings:
-    def __init__(self, path):
+    def __init__(self, path, *, legacy_path=None):
         self.path = Path(path)
         self.position = None
         self.preview_enabled = True
@@ -57,7 +66,8 @@ class MinimapSettings:
         self.ink_opacity = DEFAULT_INK_OPACITY
         self.load_error = None
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            contents = self._read(legacy_path)
+            payload = json.loads(contents)
             if not isinstance(payload, dict) or payload.get("version") != 1:
                 raise ValueError("不支持的小地图位置配置版本。")
             enabled = payload.get("preview_enabled", True)
@@ -82,6 +92,20 @@ class MinimapSettings:
             pass
         except (OSError, ValueError, TypeError) as exc:
             self.load_error = f"小地图位置配置无法读取，请重新设置：{exc}"
+
+    def _read(self, legacy_path):
+        try:
+            return self.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            if legacy_path is None:
+                raise
+        contents = Path(legacy_path).read_text(encoding="utf-8")
+        try:
+            self._write(contents, replace=False)
+        except FileExistsError:
+            # Another running copy may have created the portable file first.
+            return self.path.read_text(encoding="utf-8")
+        return contents
 
     def save_position(self, position):
         if not isinstance(position, MinimapPosition):
@@ -109,21 +133,28 @@ class MinimapSettings:
         payload = dict(version=1, minimap=position.to_payload() if position else None,
                        preview_enabled=preview_enabled, minimize_on_tracking=minimize_on_tracking,
                        ink_opacity=ink_opacity)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as file:
-                json.dump(payload, file, ensure_ascii=False, indent=2)
-            os.replace(temporary, self.path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+        self._write(json.dumps(payload, ensure_ascii=False, indent=2))
         # Publish only after the persistent update succeeds.
         self.position = position
         self.preview_enabled = preview_enabled
         self.minimize_on_tracking = minimize_on_tracking
         self.ink_opacity = ink_opacity
         self.load_error = None
+
+    def _write(self, contents, *, replace=True):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
+                file.write(contents)
+            if replace:
+                os.replace(temporary, self.path)
+            else:
+                # On Windows, rename fails if the destination already exists.
+                os.rename(temporary, self.path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     def require_position(self, client_size):
         if self.load_error:

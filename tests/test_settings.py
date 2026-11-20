@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from map_overlay.settings import MinimapPosition, MinimapSettings
+from map_overlay import settings as settings_module
+from map_overlay.settings import MinimapPosition, MinimapSettings, portable_settings_path
 
 
 class MinimapSettingsTests(unittest.TestCase):
@@ -123,6 +124,35 @@ class MinimapSettingsTests(unittest.TestCase):
         for invalid in (None, 0, "false"):
             with self.subTest(value=invalid), self.assertRaises(ValueError):
                 restarted.save_minimize_on_tracking(invalid)
+
+    def test_portable_path_uses_source_or_executable_directory(self):
+        with patch.object(settings_module.sys, "frozen", False, create=True):
+            self.assertEqual(portable_settings_path(), Path(__file__).resolve().parents[1] / "settings.json")
+        exe = self.path.parent / "RouteOverlay.exe"
+        with patch.object(settings_module.sys, "frozen", True, create=True), \
+                patch.object(settings_module.sys, "executable", str(exe)):
+            self.assertEqual(portable_settings_path(), self.path)
+
+    def test_legacy_settings_copied_once_and_future_updates_are_portable(self):
+        legacy = self.path.parent.parent / "legacy" / "settings.json"
+        self.assertIsNone(MinimapSettings(self.path, legacy_path=legacy).load_error)
+        self.assertFalse(self.path.exists())
+        old = MinimapSettings(legacy)
+        old.save_position(self.position)
+        old.save_preview_enabled(False)
+        old.save_minimize_on_tracking(False)
+        old.save_ink_opacity(32)
+        original = legacy.read_bytes()
+
+        portable = MinimapSettings(self.path, legacy_path=legacy)
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertEqual(portable.position, self.position)
+        self.assertFalse(portable.preview_enabled)
+        self.assertFalse(portable.minimize_on_tracking)
+        self.assertEqual(portable.ink_opacity, 32)
+        portable.save_ink_opacity(50)
+        self.assertEqual(legacy.read_bytes(), original)
+        self.assertEqual(MinimapSettings(self.path, legacy_path=legacy).ink_opacity, 50)
 
 
 if __name__ == "__main__":

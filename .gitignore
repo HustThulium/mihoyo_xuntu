@@ -6,6 +6,7 @@ __pycache__/
 build/
 dist/
 /RouteOverlay.spec
+/settings.json
 projects/
 # Internal research, plans, validation records and work notes stay local.
 /docs/
