@@ -12,12 +12,13 @@ enable_dpi_awareness()
 
 from PySide6.QtCore import QLibraryInfo, QTimer, QTranslator
 from PySide6.QtWidgets import QApplication
+from map_overlay import APP_NAME
 from map_overlay.app import MainWindow
 
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("循图")
+    app.setApplicationName(APP_NAME)
     app.setOrganizationName("LocalRouteOverlay")
     app.setStyle("Fusion")
     translator = QTranslator(app)

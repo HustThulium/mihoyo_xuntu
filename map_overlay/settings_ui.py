@@ -1,13 +1,15 @@
 """Categorized program preferences; persistence stays in MainWindow."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QPainter, QPalette
+from PySide6.QtCore import QEvent, Qt, QSize
+from PySide6.QtGui import QIcon, QPainter, QPalette
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
                               QListWidget, QListWidgetItem, QPushButton,
                               QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
 
+from . import APP_DESCRIPTION, APP_NAME, __version__
 from .settings import DEFAULT_THEME, THEME_CHOICES
+from .theme import ICONS
 
 
 class SettingsSwitch(QCheckBox):
@@ -43,11 +45,31 @@ class SettingsSwitch(QCheckBox):
             painter.drawRoundedRect(0, 1, 49, 28, 14, 14)
 
 
+class AboutLink(QLabel):
+    def __init__(self, url):
+        super().__init__()
+        self.url = url
+        self.setTextFormat(Qt.TextFormat.RichText)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        self.setOpenExternalLinks(True)
+        self.setWordWrap(True)
+        self.update_link()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.PaletteChange and self.text():
+            self.update_link()
+
+    def update_link(self):
+        color = self.palette().color(QPalette.ColorRole.Link).name()
+        self.setText(f'<a href="{self.url}" style="color:{color}">{self.url}</a>')
+
+
 class SettingsDialog(QDialog):
     def __init__(self, preview_enabled, parent=None, *, minimize_on_tracking=True, theme=DEFAULT_THEME):
         super().__init__(parent)
         self.setObjectName("settingsDialog")
-        self.setWindowTitle("设置 · 循图")
+        self.setWindowTitle(f"设置 · {APP_NAME}")
         self.resize(780, 490)
         self.setMinimumSize(620, 390)
         self.category_indexes = {}
@@ -83,7 +105,8 @@ class SettingsDialog(QDialog):
         footer_layout.setContentsMargins(28, 14, 28, 18)
         saved_hint = QLabel("更改后立即生效并自动保存")
         saved_hint.setObjectName("muted")
-        footer_layout.addWidget(saved_hint, 1)
+        footer_layout.addWidget(saved_hint)
+        footer_layout.addStretch(1)
         close = QPushButton("关闭")
         close.setObjectName("settingsClose")
         close.setAutoDefault(False)
@@ -121,8 +144,52 @@ class SettingsDialog(QDialog):
         card.addLayout(row)
         appearance.addStretch()
 
+        about = self.add_category("about", "关于")
+        self.add_about_details(about)
+        about.addStretch()
+
         self.categories.currentRowChanged.connect(self.pages.setCurrentIndex)
+        self.pages.currentChanged.connect(
+            lambda index: saved_hint.setVisible(index != self.category_indexes["about"]))
         self.select_category("general")
+
+    def add_about_details(self, column):
+        summary = self.add_card(column)
+        row = QHBoxLayout()
+        row.setSpacing(16)
+        icon = QLabel()
+        icon.setPixmap(self.windowIcon().pixmap(QSize(52, 52), self.devicePixelRatioF()))
+        row.addWidget(icon)
+        details = QVBoxLayout()
+        details.setSpacing(4)
+        name = QLabel(APP_NAME)
+        name.setObjectName("aboutAppName")
+        details.addWidget(name)
+        details.addWidget(self.description(f"{APP_DESCRIPTION} · 版本 {__version__}"))
+        row.addLayout(details, 1)
+        summary.addLayout(row)
+
+        links = self.add_card(column)
+        self.add_about_link(links, "github", "项目 GitHub", "https://github.com/HustThulium/mihoyo_xuntu")
+        self.add_about_link(links, "bilibili", "作者 B 站", "https://space.bilibili.com/603381")
+
+    def add_about_link(self, column, icon_name, title, url):
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        icon = QLabel()
+        icon.setObjectName("aboutLinkIcon")
+        icon.setFixedSize(36, 36)
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setPixmap(QIcon(f"{ICONS}/{icon_name}.svg").pixmap(QSize(19, 19), self.devicePixelRatioF()))
+        row.addWidget(icon, alignment=Qt.AlignmentFlag.AlignTop)
+        details = QVBoxLayout()
+        details.setSpacing(4)
+        name = QLabel(title)
+        name.setObjectName("panelHeading")
+        details.addWidget(name)
+        details.addWidget(AboutLink(url))
+        row.addLayout(details, 1)
+        column.addLayout(row)
 
     def add_category(self, key, title):
         """Register a navigation entry and its scrollable page together."""

@@ -9,15 +9,16 @@ project_root = Path(SPECPATH).parent
 if sysconfig.get_platform() != 'win-amd64':
     raise SystemExit('RouteOverlay requires an x64 Windows build interpreter.')
 
-version = run_path(str(project_root / 'map_overlay' / '__init__.py'))['__version__']
+metadata = run_path(str(project_root / 'map_overlay' / '__init__.py'))
+version = metadata['__version__']
 windows_version = (*map(int, version.split('.')), 0)
 version_resource = versioninfo.VSVersionInfo(
     ffi=versioninfo.FixedFileInfo(filevers=windows_version, prodvers=windows_version,
                                  OS=0x40004, fileType=1),
     kids=[
         versioninfo.StringFileInfo([versioninfo.StringTable('080404b0', [
-            versioninfo.StringStruct('FileDescription', '循图 · 原神路线叠加工具'),
-            versioninfo.StringStruct('ProductName', '循图'),
+            versioninfo.StringStruct('FileDescription', f"{metadata['APP_NAME']} · {metadata['APP_DESCRIPTION']}"),
+            versioninfo.StringStruct('ProductName', metadata['APP_NAME']),
             versioninfo.StringStruct('FileVersion', version),
             versioninfo.StringStruct('ProductVersion', version),
             versioninfo.StringStruct('OriginalFilename', 'RouteOverlay.exe'),

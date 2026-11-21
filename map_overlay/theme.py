@@ -154,6 +154,8 @@ def stylesheet(theme):
     QListWidget#settingsCategories::item:hover {{ background:{p['hover']}; }}
     QListWidget#settingsCategories::item:selected {{ color:{p['on_gold']}; background:{p['gold']}; }}
     QListWidget#settingsCategories::item:focus {{ border-color:{p['heading']}; }}
+    QLabel#aboutAppName {{ font-size:21px; font-weight:700; }}
+    QLabel#aboutLinkIcon {{ background:{LIGHT['field']}; border:1px solid {p['border']}; border-radius:6px; }}
     {control_styles(theme)}
     {control_styles('dark', '#editor')}
     #editor QPushButton#previewToggle, QPushButton#settingsButton {{ background:transparent; border-color:transparent; }}

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
                               QInputDialog, QColorDialog, QSlider,
                               QScrollArea)
 
-from . import native
+from . import APP_DESCRIPTION, APP_NAME, native
 from .annotations import MAX_ERASER_DIAMETER, affine_transform, paint_minimap
 from .capture import CapturePause, TrackingWorker, PreviewWorker, grab
 from .geometry import inverse
@@ -26,7 +26,7 @@ from .widgets import (AnnotationView, RegionDialog, CalibrationDialog,
                       RouteOverlay, MinimapSettingsDialog, ink_size_control, qimage)
 
 
-APP_TITLE = "循图 · 原神路线叠加工具"
+APP_TITLE = f"{APP_NAME} · {APP_DESCRIPTION}"
 APP_ICON_PATH = Path(__file__).with_name("icons") / "xuntu.ico"
 
 
@@ -90,11 +90,11 @@ class MainWindow(QMainWindow):
         mark.setObjectName("brandMark")
         mark.setPixmap(self.windowIcon().pixmap(QSize(24, 24), self.devicePixelRatioF()))
         brand.addWidget(mark)
-        name = QLabel("循图")
+        name = QLabel(APP_NAME)
         name.setObjectName("brandName")
         brand.addWidget(name)
         brand.addSpacing(6)
-        description = QLabel("原神路线叠加工具")
+        description = QLabel(APP_DESCRIPTION)
         description.setObjectName("brandDescription")
         brand.addWidget(description)
         brand.addStretch()

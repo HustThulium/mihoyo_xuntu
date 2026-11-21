@@ -9,12 +9,12 @@ from unittest.mock import call, patch, Mock
 
 import numpy as np
 import cv2
-from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QEvent, QTimer, Qt
-from PySide6.QtGui import QColor, QImage, QPalette, QTransform
+from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Qt, QUrl, Slot
+from PySide6.QtGui import QColor, QDesktopServices, QImage, QPalette, QTransform
 from PySide6.QtTest import QTest
 
-from map_overlay import native
+from map_overlay import APP_NAME, __version__, native
 from map_overlay.app import MainWindow
 from map_overlay.project import Marker, Project, decode_asset
 from map_overlay.settings import MinimapPosition, MinimapSettings
@@ -373,7 +373,54 @@ class AppSettingsTests(unittest.TestCase):
             self.window.open_settings()
             select.assert_called_once()
         self.assertEqual(observed, ["小地图位置设置", False])
-        self.assertEqual(list(dialog.category_indexes), ["general", "appearance"])
+        self.assertEqual(list(dialog.category_indexes), ["general", "appearance", "about"])
+
+    def test_about_shows_release_version_and_opens_the_displayed_links(self):
+        dialog = self.window.settings_dialog
+        dialog.show()
+        about = dialog.categories.item(dialog.category_indexes["about"])
+        QTest.mouseClick(dialog.categories.viewport(), Qt.MouseButton.LeftButton,
+                         pos=dialog.categories.visualItemRect(about).center())
+        self.app.processEvents()
+
+        self.assertEqual(about.text(), "关于")
+        self.assertEqual(dialog.pages.currentIndex(), dialog.category_indexes["about"])
+        page = dialog.pages.currentWidget()
+        labels = page.findChildren(QLabel)
+        self.assertEqual(page.findChild(QLabel, "aboutAppName").text(), APP_NAME)
+        self.assertTrue(any(f"版本 {__version__}" in label.text() for label in labels))
+        icons = page.findChildren(QLabel, "aboutLinkIcon")
+        self.assertEqual(len(icons), 2)
+        self.assertTrue(all(not icon.pixmap().isNull() for icon in icons))
+        links = [label for label in labels if label.openExternalLinks()]
+        urls = ["https://github.com/HustThulium/mihoyo_xuntu", "https://space.bilibili.com/603381"]
+        self.assertEqual(len(links), len(urls))
+        for link, url in zip(links, urls):
+            self.assertIn(f">{url}</a>", link.text())
+
+        opened = []
+
+        class Browser(QObject):
+            @Slot(QUrl)
+            def open(self, url):
+                opened.append(url.toString())
+
+        browser = Browser()
+        QDesktopServices.setUrlHandler("https", browser, "open")
+        try:
+            for link in links:
+                QTest.mouseClick(link, Qt.MouseButton.LeftButton, pos=QPoint(8, link.height() // 2))
+        finally:
+            QDesktopServices.unsetUrlHandler("https")
+        self.assertEqual(opened, urls)
+        self.assertFalse(self.path.exists())
+
+        picker = dialog.theme_picker
+        original_color = links[0].palette().color(QPalette.ColorRole.Link).name()
+        picker.setCurrentIndex(picker.findData("dark"))
+        updated_color = links[0].palette().color(QPalette.ColorRole.Link).name()
+        self.assertNotEqual(updated_color, original_color)
+        self.assertTrue(all(f'color:{updated_color}' in link.text() for link in links))
 
     def test_window_preference_switch_persists_and_rolls_back_failed_save(self):
         toggle = self.window.settings_dialog.minimize_toggle

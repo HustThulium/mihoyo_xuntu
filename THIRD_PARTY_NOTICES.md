@@ -12,6 +12,7 @@ RouteOverlay uses Qt, PySide6 Essentials and Shiboken6 under the GNU Lesser Gene
 | PySide6 Essentials / Shiboken6 / Qt | https://www.qt.io/qt-for-python | LGPL-3.0 |
 | MSS | https://github.com/BoboTiG/python-mss | MIT |
 | PyInstaller | https://pyinstaller.org/ | GPL with bootloader exception |
+| Simple Icons (GitHub and Bilibili icons) | https://github.com/simple-icons/simple-icons | CC0-1.0 for the SVG artwork. The marks belong to their respective owners. |
 | Microsoft Visual C++ runtime | https://learn.microsoft.com/cpp/windows/determining-which-dlls-to-redistribute | Microsoft Distributable Code, see the notice in `THIRD_PARTY_LICENSES/Python-LICENSE.txt` |
 
 ## Qt source and library replacement
