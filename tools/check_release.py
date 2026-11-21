@@ -17,6 +17,7 @@ from zipfile import ZipFile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SAMPLE_MANIFEST = json.loads((ROOT / 'packaging/samples.json').read_text(encoding='utf-8'))
 sys.path.insert(0, str(ROOT))
 from map_overlay.demo import make_demo
 
@@ -44,8 +45,12 @@ def extract_runtime(path: Path, destination: Path) -> Path:
         if hashlib.file_digest(stream, 'sha256').hexdigest() != expected_hash:
             raise RuntimeError('Runtime ZIP checksum mismatch.')
 
+    sample_directory = SAMPLE_MANIFEST['directory']
+    sample_prefix = f'RouteOverlay/{sample_directory}/'
+    sample_sources = {f'{sample_prefix}{name}': ROOT / sample_directory / name
+                      for name in SAMPLE_MANIFEST['files']}
     allowed = {'RouteOverlay.exe', '_internal', 'README.md', 'RELEASE_NOTES.md',
-               'THIRD_PARTY_NOTICES.md', 'THIRD_PARTY_LICENSES'}
+               'THIRD_PARTY_NOTICES.md', 'THIRD_PARTY_LICENSES', sample_directory}
     required = {'RouteOverlay.exe', '_internal/cv2/__init__.py', '_internal/cv2/cv2.pyd',
                 '_internal/PySide6/translations/qtbase_zh_CN.qm',
                 'THIRD_PARTY_LICENSES/GPL-3.0-only.txt', 'THIRD_PARTY_LICENSES/LGPL-3.0-only.txt',
@@ -59,9 +64,17 @@ def extract_runtime(path: Path, destination: Path) -> Path:
             raise RuntimeError('Unexpected runtime ZIP layout.')
         if not {f'RouteOverlay/{name}' for name in required} <= set(names):
             raise RuntimeError('Runtime files or licenses missing from the ZIP.')
-        if any(name.lower().endswith(('/settings.json', '.routepack', '.log', '/opengl32sw.dll'))
+        if any(name.lower().endswith(('/settings.json', '.log', '/opengl32sw.dll'))
+               or (name.lower().endswith('.routepack') and name not in sample_sources)
                or 'opencv_videoio_ffmpeg' in name.lower() for name in names):
             raise RuntimeError('Unexpected data or optional library in the runtime ZIP.')
+        if {name for name in names if name.startswith(sample_prefix)} != set(sample_sources):
+            raise RuntimeError('The bundled samples do not match the sample manifest.')
+        if archive.read('RouteOverlay/README.md') != (ROOT / 'packaging/README.md').read_bytes():
+            raise RuntimeError('The runtime ZIP does not contain the release README.')
+        for name, source in sample_sources.items():
+            if archive.read(name) != source.read_bytes():
+                raise RuntimeError(f'Incorrect sample in runtime ZIP: {name}')
         archive.extractall(destination)  # Also checks each entry's CRC.
     return destination / 'RouteOverlay/RouteOverlay.exe'
 
@@ -206,7 +219,9 @@ def main(runtime: Path, qt_sources: Path) -> None:
         exe = extract_runtime(runtime, destination)
         route = destination / '演示 路线.routepack'
         make_demo().save(route)
-        for argument in (None, route, None, route):
+        sample_name = next(name for name in SAMPLE_MANIFEST['files'] if name.endswith('.routepack'))
+        sample_route = exe.parent / SAMPLE_MANIFEST['directory'] / sample_name
+        for argument in (None, route, None, sample_route):
             smoke_test(exe, argument)
 
 

@@ -15,6 +15,12 @@ $version = & $projectPython -c 'from map_overlay import __version__; print(__ver
 if ($LASTEXITCODE -ne 0 -or $version -notmatch '^\d+\.\d+\.\d+$') {
     throw 'Could not read the release version from map_overlay.'
 }
+$samples = Get-Content -LiteralPath 'packaging/samples.json' -Raw -Encoding UTF8 | ConvertFrom-Json
+$sampleFiles = foreach ($name in $samples.files) {
+    $file = Join-Path $samples.directory $name
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing release sample: $file" }
+    $file
+}
 $packageDir = Join-Path $PSScriptRoot 'dist/RouteOverlay'
 $settingsPath = Join-Path $packageDir 'settings.json'
 $settingsBackup = $null
@@ -37,7 +43,9 @@ try {
         Remove-Item -LiteralPath $settingsBackup
     }
 }
-Copy-Item -LiteralPath 'README.md', 'packaging/RELEASE_NOTES.md', 'THIRD_PARTY_NOTICES.md' -Destination $packageDir
+Copy-Item -LiteralPath 'packaging/README.md', 'packaging/RELEASE_NOTES.md', 'THIRD_PARTY_NOTICES.md' -Destination $packageDir
+$sampleDestination = New-Item -ItemType Directory -Path (Join-Path $packageDir $samples.directory) -Force
+Copy-Item -LiteralPath $sampleFiles -Destination $sampleDestination.FullName
 $licenseRoot = Join-Path $PSScriptRoot 'dist/RouteOverlay/THIRD_PARTY_LICENSES'
 New-Item -ItemType Directory -Path $licenseRoot -Force | Out-Null
 Get-ChildItem -LiteralPath 'packaging/licenses' -File | Copy-Item -Destination $licenseRoot
@@ -63,12 +71,13 @@ if (-not (Test-Path -LiteralPath $pythonLicense -PathType Leaf)) {
 Copy-Item -LiteralPath $pythonLicense -Destination (Join-Path $licenseRoot 'Python-LICENSE.txt') -Force
 
 # Archive only release files. The local installation can contain personal settings.
+Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $releaseDir = (New-Item -ItemType Directory -Path $ArchiveDirectory -Force).FullName
 $zipName = "RouteOverlay-v$version-windows-x64.zip"
 $zipPath = Join-Path $releaseDir $zipName
 $temporaryZip = Join-Path $releaseDir ([IO.Path]::GetRandomFileName())
-$packageFiles = 'RouteOverlay.exe', '_internal', 'README.md', 'RELEASE_NOTES.md', 'THIRD_PARTY_NOTICES.md', 'THIRD_PARTY_LICENSES' |
+$packageFiles = 'RouteOverlay.exe', '_internal', 'README.md', 'RELEASE_NOTES.md', 'THIRD_PARTY_NOTICES.md', 'THIRD_PARTY_LICENSES', $samples.directory |
     ForEach-Object { Get-ChildItem -LiteralPath (Join-Path $packageDir $_) -File -Recurse -Force }
 try {
     $archive = [IO.Compression.ZipFile]::Open($temporaryZip, [IO.Compression.ZipArchiveMode]::Create)

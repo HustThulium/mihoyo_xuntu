@@ -13,4 +13,5 @@ projects/
 # Local route import samples and validation previews.
 /导入叠加层样例图/
 *.routepack
+!/发布包样例资源/妖精绿艾-绿洲-样例.routepack
 *.log
